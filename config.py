@@ -1,9 +1,0 @@
-CITIES = ["Dallas TX","Tampa FL","Denver CO"]
-CATEGORIES = ["plumber","electrician","roofing contractor"]
-MAX_RESULTS_PER_QUERY = 40
-REQUEST_TIMEOUT = 10
-MIN_SCORE_TO_EXPORT = 3
-OUTPUT_FILE = "leads.csv"
-STATE_DB = "seen_leads.sqlite"
-GUMROAD_PRODUCT_ID = "REPLACE_WITH_YOUR_PRODUCT_ID"
-GUMROAD_API_KEY = "REPLACE_WITH_YOUR_API_KEY"

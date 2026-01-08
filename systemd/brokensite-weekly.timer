@@ -1,0 +1,15 @@
+[Unit]
+Description=Run BrokenSite Weekly every Sunday at 3am UTC
+
+[Timer]
+# Run every Sunday at 03:00 UTC
+OnCalendar=Sun *-*-* 03:00:00
+# Random delay up to 30 minutes to avoid exact timing patterns
+RandomizedDelaySec=1800
+# Persist timer across reboots
+Persistent=true
+# Don't run immediately if we missed the last window
+AccuracySec=1h
+
+[Install]
+WantedBy=timers.target

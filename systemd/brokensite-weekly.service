@@ -1,0 +1,40 @@
+[Unit]
+Description=BrokenSite Weekly Lead Generator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=brokensite
+Group=brokensite
+WorkingDirectory=/opt/brokensite-weekly
+Environment=PYTHONUNBUFFERED=1
+
+# Load environment from file
+EnvironmentFile=/opt/brokensite-weekly/.env
+
+# Run the weekly script
+ExecStart=/opt/brokensite-weekly/venv/bin/python -m src.run_weekly
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=80%
+
+# Timeouts
+TimeoutStartSec=7200
+TimeoutStopSec=60
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=brokensite-weekly
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/brokensite-weekly/data /opt/brokensite-weekly/logs /opt/brokensite-weekly/output /opt/brokensite-weekly/debug
+
+[Install]
+WantedBy=multi-user.target

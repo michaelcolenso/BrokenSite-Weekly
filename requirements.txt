@@ -1,4 +1,14 @@
-playwright
-requests
-beautifulsoup4
-schedule
+# BrokenSite-Weekly Dependencies
+# Install with: pip install -r requirements.txt
+
+# Browser automation for Google Maps scraping
+playwright>=1.40.0
+
+# HTTP requests for website scoring
+requests>=2.31.0
+
+# No other dependencies - using stdlib for everything else:
+# - sqlite3 (database)
+# - smtplib (email)
+# - csv (export)
+# - logging (logs)
