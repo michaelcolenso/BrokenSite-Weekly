@@ -6,50 +6,77 @@ A fully unattended weekly lead-generation system for local businesses with broke
 ## Architecture
 ```
 src/
-├── config.py          # Environment-based configuration
-├── db.py              # SQLite database layer (leads, dedupe, subscribers)
-├── retry.py           # Exponential backoff utilities
-├── logging_setup.py   # Structured logging configuration
-├── maps_scraper.py    # Playwright-based Google Maps scraper
-├── scoring.py         # Website health/broken scoring
-├── gumroad.py         # Gumroad subscriber retrieval (single product)
-├── delivery.py        # SMTP email delivery with CSV attachment
-└── run_weekly.py      # Main orchestrator script
+├── config.py          # Environment-based configuration (dataclasses)
+├── db.py              # SQLite: leads, runs, exports tables
+├── retry.py           # Exponential backoff with jitter
+├── logging_setup.py   # Rotating file + stderr logging
+├── maps_scraper.py    # Playwright Google Maps scraper (hardened)
+├── scoring.py         # Website health scoring (weighted signals)
+├── gumroad.py         # Subscriber retrieval (read-only, single product)
+├── delivery.py        # SMTP with CSV attachment
+└── run_weekly.py      # Main orchestrator with graceful shutdown
+
+systemd/
+├── brokensite-weekly.service  # oneshot service
+└── brokensite-weekly.timer    # Sunday 3am UTC
 ```
 
-## Key Design Decisions
-- **Playwright for Maps**: Browser automation for Google Maps scraping (handles consent, dynamic loading)
-- **SQLite for storage**: Simple, file-based, no external dependencies
-- **Per-item isolation**: Failures in one lead/subscriber don't crash the entire run
-- **Stable IDs**: Store Google place_id/CID for proper deduplication
-- **Conservative scoring**: Hard failures (5xx, unreachable) weighted high; DIY builders weighted low to minimize false positives
+## Key Reliability Features
+- **Consent handling**: Multiple selector strategies for Google cookie banners
+- **Debug dumps**: Screenshot + HTML saved on scraper failures
+- **Per-item isolation**: One business/subscriber failure won't crash the run
+- **Graceful shutdown**: SIGTERM/SIGINT handled, partial progress preserved
+- **Deduplication**: Uses Google place_id (stable) with 90-day window
+- **Retry with backoff**: Configurable exponential backoff + jitter
 
-## Environment Variables Required
+## Scoring Weights
+| Signal | Weight | Category |
+|--------|--------|----------|
+| Unreachable | 100 | Hard failure |
+| Timeout | 90 | Hard failure |
+| 5xx error | 85 | Hard failure |
+| SSL error | 80 | Hard failure |
+| Parked domain | 75 | Hard failure |
+| No HTTPS | 30 | Medium |
+| Old copyright | 25 | Medium |
+| No viewport | 20 | Medium |
+| Wix/Squarespace | 5 | Weak (low to avoid false positives) |
+
+Threshold: **score >= 40** to export
+
+## Environment Variables
 ```bash
-GUMROAD_ACCESS_TOKEN=   # Gumroad API token
-GUMROAD_PRODUCT_ID=     # Single subscription product ID
-SMTP_HOST=              # SMTP server (default: smtp.gmail.com)
-SMTP_PORT=              # SMTP port (default: 587)
-SMTP_USERNAME=          # SMTP login
-SMTP_PASSWORD=          # SMTP password or app password
-SMTP_FROM_EMAIL=        # Sender email address
-SMTP_FROM_NAME=         # Sender display name
+GUMROAD_ACCESS_TOKEN=   # From Gumroad settings
+GUMROAD_PRODUCT_ID=     # Existing subscription product
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=          # Your email
+SMTP_PASSWORD=          # App password (not regular password)
+SMTP_FROM_EMAIL=        # Sender address
+SMTP_FROM_NAME=         # Display name
 ```
 
-## Running
+## CLI Commands
 ```bash
-# Manual run
-python -m src.run_weekly
-
-# Via systemd (production)
-systemctl start brokensite-weekly.service
+python -m src.run_weekly              # Full run
+python -m src.run_weekly --scrape-only    # No delivery
+python -m src.run_weekly --deliver-only   # No scraping
+python -m src.run_weekly --stats          # DB statistics
+python -m src.run_weekly --validate       # Check config
 ```
 
 ## File Locations
 - **Database**: `data/leads.db`
-- **Logs**: `logs/brokensite-weekly.log`
-- **Weekly CSVs**: `output/leads_YYYY-MM-DD.csv`
-- **Debug dumps**: `debug/` (screenshots, HTML on scraper failures)
+- **Logs**: `logs/brokensite-weekly.log` (rotates at 10MB)
+- **CSV output**: `output/leads_YYYY-MM-DD.csv`
+- **Debug dumps**: `debug/*.png`, `debug/*.html`
 
-## Business Model
-~20 Gumroad subscribers at $50/month = ~$1,000/month. Subscribers receive weekly CSV of scored broken-website leads in their target niches.
+## Database Schema
+Primary tables: `leads` (place_id PK), `runs`, `exports`
+See RUNBOOK.md for full schema.
+
+## Testing Changes
+1. `--validate` to check config
+2. `--scrape-only` to test scraping without emails
+3. `--deliver-only` to test delivery with existing leads
+4. Check `logs/` and `debug/` for issues
