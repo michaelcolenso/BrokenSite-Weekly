@@ -1,0 +1,60 @@
+# BrokenSite-Weekly Docker Ignore
+# Exclude files not needed in the container
+
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+.mypy_cache
+.pytest_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Documentation (not needed at runtime)
+*.md
+!README.md
+docs/
+
+# Test files
+tests/
+test_*.py
+*_test.py
+
+# Local development files
+data/
+logs/
+output/
+debug/
+*.db
+*.db-wal
+*.db-shm
+
+# Misc
+.DS_Store
+Thumbs.db
+*.log

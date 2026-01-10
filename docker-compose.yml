@@ -1,0 +1,113 @@
+# BrokenSite-Weekly Docker Compose Configuration
+# Production-ready orchestration for containerized deployment
+
+services:
+  brokensite-weekly:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: brokensite-weekly:latest
+    container_name: brokensite-weekly
+
+    # Environment configuration
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+
+    # Persistent volumes
+    volumes:
+      - brokensite-data:/app/data
+      - brokensite-logs:/app/logs
+      - brokensite-output:/app/output
+      - brokensite-debug:/app/debug
+
+    # Resource limits (match systemd config)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.80'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+
+    # Restart policy for robustness
+    restart: "no"  # Oneshot - runs and exits
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false  # Playwright needs write access
+
+    # Network isolation
+    networks:
+      - brokensite-net
+
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "/app/healthcheck.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  # Scheduled runner using Ofelia (cron-like scheduler for Docker)
+  scheduler:
+    image: mcuadros/ofelia:latest
+    container_name: brokensite-scheduler
+    depends_on:
+      - brokensite-weekly
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      # Run every Sunday at 3:00 AM UTC (matches systemd timer)
+      ofelia.job-run.brokensite.schedule: "0 3 * * 0"
+      ofelia.job-run.brokensite.container: "brokensite-weekly"
+    restart: unless-stopped
+    networks:
+      - brokensite-net
+
+# Named volumes for data persistence
+volumes:
+  brokensite-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BROKENSITE_DATA_PATH:-./data}
+  brokensite-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BROKENSITE_LOGS_PATH:-./logs}
+  brokensite-output:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BROKENSITE_OUTPUT_PATH:-./output}
+  brokensite-debug:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${BROKENSITE_DEBUG_PATH:-./debug}
+
+# Isolated network
+networks:
+  brokensite-net:
+    driver: bridge
+    ipam:
+      driver: default

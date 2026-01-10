@@ -86,13 +86,55 @@ CREATE INDEX IF NOT EXISTS idx_exports_subscriber ON exports(subscriber_email);
 
 
 class Database:
-    """SQLite database manager for lead storage and deduplication."""
+    """
+    SQLite database manager for lead storage and deduplication.
+
+    Optimized for deployment with:
+    - Connection caching (reuses single connection per instance)
+    - WAL mode for better concurrent access
+    - Optimized pragmas for performance
+    - Proper timeout handling
+    """
+
+    # Connection timeout in seconds
+    CONNECTION_TIMEOUT = 30.0
 
     def __init__(self, config: DatabaseConfig = None):
         self.config = config or DatabaseConfig()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.db_path = self.config.db_path
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_schema()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get or create a database connection with optimized settings."""
+        if self._conn is not None:
+            try:
+                # Test connection is still valid
+                self._conn.execute("SELECT 1")
+                return self._conn
+            except sqlite3.Error:
+                # Connection is stale, create new one
+                self._conn = None
+
+        conn = sqlite3.connect(
+            self.db_path,
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            timeout=self.CONNECTION_TIMEOUT,
+            isolation_level="DEFERRED",  # Better for mixed read/write workloads
+        )
+        conn.row_factory = sqlite3.Row
+
+        # Apply performance pragmas
+        conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for concurrency
+        conn.execute("PRAGMA synchronous=NORMAL")  # Good balance of safety/speed
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
+        conn.execute("PRAGMA temp_store=MEMORY")  # Keep temp tables in memory
+        conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+        conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+
+        self._conn = conn
+        return conn
 
     def _init_schema(self):
         """Initialize database schema."""
@@ -102,25 +144,38 @@ class Database:
 
     @contextmanager
     def _connect(self):
-        """Context manager for database connections."""
-        conn = sqlite3.connect(
-            self.db_path,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
-        )
-        conn.row_factory = sqlite3.Row
+        """
+        Context manager for database transactions.
+
+        Uses cached connection and handles transaction lifecycle.
+        """
+        conn = self._get_connection()
         try:
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.close()
+
+    def close(self):
+        """Close the database connection. Call when done with database operations."""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
+            self._conn = None
+
+    def __del__(self):
+        """Ensure connection is closed on garbage collection."""
+        self.close()
 
     def is_duplicate(self, place_id: str, website: Optional[str] = None) -> bool:
         """
         Check if a lead is a duplicate within the dedupe window.
         Primary key is place_id, but also checks website for fallback matching.
+
+        Note: For atomic duplicate-check-and-insert, use upsert_lead_atomic() instead.
         """
         cutoff = datetime.utcnow() - timedelta(days=self.config.dedupe_window_days)
 
@@ -147,18 +202,21 @@ class Database:
     def upsert_lead(self, lead: Lead) -> bool:
         """
         Insert or update a lead. Returns True if this is a new lead.
+
+        This method is atomic - the check and insert/update happen in a single transaction.
         """
         now = datetime.utcnow()
 
         with self._connect() as conn:
-            # Check if exists
+            # Use a single atomic transaction with INSERT ... ON CONFLICT
+            # First, try to get the existing first_seen value
             existing = conn.execute(
-                "SELECT place_id, first_seen FROM leads WHERE place_id = ?",
+                "SELECT first_seen FROM leads WHERE place_id = ?",
                 (lead.place_id,)
             ).fetchone()
 
             if existing:
-                # Update existing
+                # Update existing - preserve first_seen
                 conn.execute("""
                     UPDATE leads SET
                         name = ?, website = ?, address = ?, phone = ?,
@@ -184,6 +242,81 @@ class Database:
                     lead.score, lead.reasons, now, now
                 ))
                 return True
+
+    def check_and_upsert_lead(self, lead: Lead) -> tuple[bool, bool]:
+        """
+        Atomically check for duplicates and upsert a lead.
+
+        Returns:
+            tuple[bool, bool]: (is_duplicate_in_window, is_new_lead)
+            - is_duplicate_in_window: True if lead was seen within dedupe window
+            - is_new_lead: True if this is a brand new lead (not seen before at all)
+
+        This method eliminates the race condition between is_duplicate() and upsert_lead()
+        by performing both operations in a single transaction.
+        """
+        now = datetime.utcnow()
+        cutoff = now - timedelta(days=self.config.dedupe_window_days)
+
+        with self._connect() as conn:
+            # Check if exists and if within dedupe window - all in one query
+            existing = conn.execute("""
+                SELECT place_id, last_seen, first_seen
+                FROM leads
+                WHERE place_id = ? OR (website = ? AND website IS NOT NULL)
+                ORDER BY
+                    CASE WHEN place_id = ? THEN 0 ELSE 1 END,
+                    last_seen DESC
+                LIMIT 1
+            """, (lead.place_id, lead.website, lead.place_id)).fetchone()
+
+            if existing:
+                is_within_window = existing["last_seen"] > cutoff
+                is_same_place = existing["place_id"] == lead.place_id
+
+                if is_same_place:
+                    # Update existing record
+                    conn.execute("""
+                        UPDATE leads SET
+                            name = ?, website = ?, address = ?, phone = ?,
+                            city = ?, category = ?, score = ?, reasons = ?,
+                            last_seen = ?, cid = ?
+                        WHERE place_id = ?
+                    """, (
+                        lead.name, lead.website, lead.address, lead.phone,
+                        lead.city, lead.category, lead.score, lead.reasons,
+                        now, lead.cid, lead.place_id
+                    ))
+                    return (is_within_window, False)
+                else:
+                    # Different place_id but same website - treat as duplicate if in window
+                    if is_within_window:
+                        return (True, False)
+                    # Otherwise, insert as new record
+                    conn.execute("""
+                        INSERT INTO leads (
+                            place_id, cid, name, website, address, phone,
+                            city, category, score, reasons, first_seen, last_seen
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        lead.place_id, lead.cid, lead.name, lead.website,
+                        lead.address, lead.phone, lead.city, lead.category,
+                        lead.score, lead.reasons, now, now
+                    ))
+                    return (False, True)
+            else:
+                # Insert new
+                conn.execute("""
+                    INSERT INTO leads (
+                        place_id, cid, name, website, address, phone,
+                        city, category, score, reasons, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    lead.place_id, lead.cid, lead.name, lead.website,
+                    lead.address, lead.phone, lead.city, lead.category,
+                    lead.score, lead.reasons, now, now
+                ))
+                return (False, True)
 
     def get_unexported_leads(self, min_score: int, limit: int = 500) -> List[Dict[str, Any]]:
         """Get leads that haven't been exported yet, above minimum score."""

@@ -32,10 +32,36 @@ class DeliveryResult:
     error: Optional[str] = None
 
 
+def sanitize_csv_field(value: Any) -> str:
+    """
+    Sanitize a field value to prevent CSV injection attacks.
+
+    CSV injection occurs when cell values starting with =, +, -, @, tab, or carriage return
+    can be interpreted as formulas by spreadsheet applications like Excel.
+
+    We prefix dangerous characters with a single quote to prevent formula interpretation.
+    """
+    if value is None:
+        return ""
+
+    str_value = str(value)
+
+    # Characters that can trigger formula interpretation in spreadsheets
+    dangerous_prefixes = ('=', '+', '-', '@', '\t', '\r', '\n')
+
+    if str_value.startswith(dangerous_prefixes):
+        # Prefix with single quote to prevent formula interpretation
+        return f"'{str_value}"
+
+    return str_value
+
+
 def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple[str, Path]:
     """
     Generate CSV content from leads.
     Returns (csv_content, file_path).
+
+    All fields are sanitized to prevent CSV injection attacks.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -62,8 +88,8 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
     writer.writeheader()
 
     for lead in leads:
-        # Ensure all fields exist
-        row = {field: lead.get(field, "") for field in fieldnames}
+        # Ensure all fields exist and sanitize to prevent CSV injection
+        row = {field: sanitize_csv_field(lead.get(field, "")) for field in fieldnames}
         writer.writerow(row)
 
     csv_content = buffer.getvalue()
