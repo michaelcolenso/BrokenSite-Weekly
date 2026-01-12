@@ -31,6 +31,12 @@ from .logging_setup import get_logger
 
 logger = get_logger("scoring")
 
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 
 @dataclass
 class ScoringResult:
@@ -42,6 +48,14 @@ class ScoringResult:
     response_time_ms: Optional[int]
     final_url: Optional[str]
     error: Optional[str]
+
+
+@dataclass
+class SimpleResponse:
+    """Minimal response wrapper for non-requests fetchers."""
+    status_code: int
+    url: str
+    text: str
 
 
 # Parked domain indicators (case-insensitive)
@@ -77,6 +91,44 @@ DIY_BUILDERS = {
     "carrd.co": "carrd",
     "wixsite.com": "wix",
 }
+
+# Social-only destinations (case-insensitive, in hostname)
+SOCIAL_ONLY_DOMAINS = [
+    "facebook.com",
+    "fb.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "linkedin.com",
+    "tiktok.com",
+    "youtube.com",
+    "pinterest.com",
+]
+
+# Bot protection indicators (case-insensitive)
+BOT_PROTECTION_INDICATORS = [
+    "cloudflare",
+    "attention required",
+    "checking your browser",
+    "verify you are human",
+    "are you human",
+    "access denied",
+    "unusual traffic",
+    "captcha",
+    "ddos protection",
+    "sucuri",
+    "incapsula",
+    "akamai",
+    "ray id",
+]
+
+# JS-required indicators (case-insensitive)
+JS_REQUIRED_INDICATORS = [
+    "enable javascript",
+    "please enable javascript",
+    "requires javascript",
+    "you need to enable javascript",
+]
 
 # Footer/copyright patterns for year extraction
 # We specifically look for copyright context to avoid false positives from
@@ -178,6 +230,144 @@ def _check_mobile_friendly(html: str) -> Tuple[bool, bool]:
     return has_viewport, has_responsive
 
 
+def _check_bot_protection(html: str, status_code: Optional[int]) -> bool:
+    """Detect bot protection or access blocks."""
+    if not html:
+        return False
+    html_lower = html.lower()
+    matches = [indicator for indicator in BOT_PROTECTION_INDICATORS if indicator in html_lower]
+    if not matches:
+        return False
+    if status_code in (403, 429, 503):
+        return True
+    return len(matches) >= 2
+
+
+def _check_js_required(html: str) -> bool:
+    """Detect pages that require JavaScript to render content."""
+    if not html:
+        return False
+    html_lower = html.lower()
+    if len(html_lower) > 2000:
+        return False
+    return any(indicator in html_lower for indicator in JS_REQUIRED_INDICATORS)
+
+
+def _dns_resolves(hostname: str) -> Optional[bool]:
+    """Return True if DNS resolves, False if NXDOMAIN, None on unknown error."""
+    if not hostname:
+        return None
+    try:
+        socket.getaddrinfo(hostname, None)
+        return True
+    except socket.gaierror:
+        return False
+    except Exception:
+        return None
+
+
+def _apply_unverified_cap(
+    score: int,
+    reasons: List[str],
+    config: ScoringConfig,
+) -> Tuple[int, List[str]]:
+    """Cap unverified leads to avoid auto-export when configured."""
+    if config.include_unverified_leads:
+        return score, reasons
+
+    if any(reason in config.unverified_reasons for reason in reasons):
+        if "unverified" not in reasons:
+            reasons.append("unverified")
+        score = min(score, config.unverified_score_cap)
+
+    return score, reasons
+
+
+def _is_social_url(url: str) -> bool:
+    """Check if the URL points to a social-only profile/page."""
+    if not url:
+        return False
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return any(host == domain or host.endswith(f".{domain}") for domain in SOCIAL_ONLY_DOMAINS)
+
+
+def _should_attempt_playwright(error: Optional[str]) -> bool:
+    """Determine whether to retry with Playwright based on error type."""
+    if not error:
+        return False
+    lowered = error.lower()
+    if "ssl_error" in lowered:
+        return False
+    return any(token in lowered for token in (
+        "timeout",
+        "connection_error",
+        "request_error",
+        "fetch_failed",
+        "too_many_redirects",
+    ))
+
+
+def _fetch_with_playwright(
+    url: str,
+    config: ScoringConfig,
+) -> Tuple[Optional[SimpleResponse], Optional[str]]:
+    """Fetch page content with Playwright as a fallback for failed requests."""
+    try:
+        from playwright.sync_api import (
+            sync_playwright,
+            TimeoutError as PlaywrightTimeout,
+            Error as PlaywrightError,
+        )
+    except Exception as e:
+        return None, f"playwright_import_error: {e}"
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+            )
+            page = context.new_page()
+            try:
+                response = page.goto(
+                    url,
+                    wait_until="domcontentloaded",
+                    timeout=config.playwright_fallback_timeout_ms,
+                )
+                final_url = page.url or url
+                html = page.content()
+                status_code = response.status if response else 0
+                if status_code == 0 and not html:
+                    return None, "playwright_no_response"
+                return SimpleResponse(
+                    status_code=status_code,
+                    url=final_url,
+                    text=html,
+                ), None
+            finally:
+                context.close()
+                browser.close()
+    except PlaywrightTimeout as e:
+        return None, f"playwright_timeout: {e}"
+    except PlaywrightError as e:
+        return None, f"playwright_error: {e}"
+    except Exception as e:
+        return None, f"playwright_error: {e}"
+
+
 def _check_outdated_tech(html: str) -> List[str]:
     """Check for outdated web technologies."""
     html_lower = html.lower()
@@ -217,48 +407,68 @@ def fetch_website(
     url = _normalize_url(url)
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
 
-    def do_fetch():
+    def do_fetch(fetch_url: str):
         return requests.get(
-            url,
+            fetch_url,
             timeout=config.request_timeout_seconds,
             headers=headers,
             allow_redirects=True,
             verify=True,  # Verify SSL
         )
 
-    try:
-        if retry_config:
-            response = retry_with_backoff(
-                func=do_fetch,
-                config=retry_config,
-                exceptions=(ConnectionError, Timeout),
-                logger=logger,
-                operation_name=f"fetch_{urlparse(url).netloc}",
-            )
-        else:
-            response = do_fetch()
+    def attempt(fetch_url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
+        try:
+            if retry_config:
+                response = retry_with_backoff(
+                    func=lambda: do_fetch(fetch_url),
+                    config=retry_config,
+                    exceptions=(ConnectionError, Timeout),
+                    logger=logger,
+                    operation_name=f"fetch_{urlparse(fetch_url).netloc}",
+                )
+            else:
+                response = do_fetch(fetch_url)
 
-        return response, None
+            return response, None
 
-    except SSLError as e:
-        return None, f"ssl_error: {e}"
-    except Timeout:
-        return None, "timeout"
-    except ConnectionError as e:
-        return None, f"connection_error: {e}"
-    except TooManyRedirects:
-        return None, "too_many_redirects"
-    except RequestException as e:
-        return None, f"request_error: {e}"
+        except SSLError as e:
+            return None, f"ssl_error: {e}"
+        except Timeout:
+            return None, "timeout"
+        except ConnectionError as e:
+            return None, f"connection_error: {e}"
+        except TooManyRedirects:
+            return None, "too_many_redirects"
+        except RequestException as e:
+            return None, f"request_error: {e}"
+
+    response, error = attempt(url)
+    if response or not config.allow_scheme_fallback:
+        return response, error
+
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        fallback_url = parsed._replace(scheme="http").geturl()
+    elif parsed.scheme == "http":
+        fallback_url = parsed._replace(scheme="https").geturl()
+    else:
+        fallback_url = None
+
+    if not fallback_url or fallback_url == url:
+        return response, error
+
+    fallback_response, fallback_error = attempt(fallback_url)
+    if fallback_response:
+        return fallback_response, None
+
+    if error and fallback_error:
+        return None, f"{error}; fallback_error: {fallback_error}"
+    return None, error or fallback_error
 
 
 def evaluate_website(
@@ -283,6 +493,37 @@ def evaluate_website(
     final_url = None
     error = None
 
+    if _is_social_url(url):
+        if not config.include_social_only_leads:
+            score, reasons = _apply_unverified_cap(
+                score=0,
+                reasons=["social_only_excluded"],
+                config=config,
+            )
+            return ScoringResult(
+                url=url,
+                score=score,
+                reasons=reasons,
+                http_status=None,
+                response_time_ms=None,
+                final_url=None,
+                error=None,
+            )
+        score, reasons = _apply_unverified_cap(
+            score=config.weight_social_only,
+            reasons=["social_only"],
+            config=config,
+        )
+        return ScoringResult(
+            url=url,
+            score=score,
+            reasons=reasons,
+            http_status=None,
+            response_time_ms=None,
+            final_url=None,
+            error=None,
+        )
+
     # Fetch if no response provided
     if response is None:
         import time
@@ -291,22 +532,65 @@ def evaluate_website(
         if response:
             response_time_ms = int((time.time() - start) * 1000)
 
+    if error and config.playwright_fallback_enabled and _should_attempt_playwright(error):
+        import time
+        fallback_start = time.time()
+        fallback_response, fallback_error = _fetch_with_playwright(url, config)
+        if fallback_response:
+            response = fallback_response
+            error = None
+            response_time_ms = int((time.time() - fallback_start) * 1000)
+        elif fallback_error:
+            error = f"{error}; {fallback_error}"
+
     # === Hard failures (high score) ===
 
+    if response is None and not error:
+        error = "fetch_failed"
+
     if error:
+        if config.dns_check_enabled and any(
+            token in error for token in ("connection_error", "request_error", "fetch_failed")
+        ):
+            hostname = urlparse(url).netloc
+            dns_result = _dns_resolves(hostname)
+            if dns_result is False:
+                score += config.weight_dns_failed
+                reasons.append("dns_failed")
+                score, reasons = _apply_unverified_cap(score, reasons, config)
+                return ScoringResult(
+                    url=url,
+                    score=score,
+                    reasons=reasons,
+                    http_status=None,
+                    response_time_ms=response_time_ms,
+                    final_url=None,
+                    error=error,
+                )
+
         if "ssl_error" in error:
             score += config.weight_ssl_error
             reasons.append("ssl_error")
         elif "timeout" in error:
             score += config.weight_timeout
             reasons.append("timeout")
-        elif "connection_error" in error or "unreachable" in error:
+        elif "fetch_failed" in error:
+            score += config.weight_fetch_failed
+            reasons.append("fetch_failed")
+        elif "connection_error" in error:
+            score += config.weight_fetch_failed
+            reasons.append("fetch_failed")
+        elif "unreachable" in error:
             score += config.weight_unreachable
             reasons.append("unreachable")
+        elif "request_error" in error or "too_many_redirects" in error:
+            score += config.weight_fetch_failed
+            reasons.append("fetch_failed")
         else:
-            score += config.weight_unreachable
+            score += config.weight_fetch_failed
             reasons.append("fetch_failed")
 
+        score, reasons = _apply_unverified_cap(score, reasons, config)
         return ScoringResult(
             url=url,
             score=score,
@@ -320,6 +604,32 @@ def evaluate_website(
     # We have a response
     http_status = response.status_code
     final_url = response.url
+
+    # === Analyze page content ===
+
+    try:
+        html = response.text
+    except Exception:
+        html = ""
+
+    if _check_bot_protection(html, http_status):
+        score += config.weight_bot_protection
+        reasons.append("bot_protection")
+        score, reasons = _apply_unverified_cap(score, reasons, config)
+        return ScoringResult(
+            url=url,
+            score=score,
+            reasons=reasons,
+            http_status=http_status,
+            response_time_ms=response_time_ms,
+            final_url=final_url,
+            error=error,
+        )
+
+    js_required = _check_js_required(html)
+    if js_required:
+        score += config.weight_js_required
+        reasons.append("js_required")
 
     # 5xx server errors
     if 500 <= http_status < 600:
@@ -336,16 +646,11 @@ def evaluate_website(
         score += 50
         reasons.append(f"http_{http_status}")
 
-    # === Analyze page content ===
-
-    try:
-        html = response.text
-    except Exception:
-        html = ""
-
     if not html or len(html) < 100:
-        score += 60
-        reasons.append("empty_page")
+        if not js_required:
+            score += 60
+            reasons.append("empty_page")
+        score, reasons = _apply_unverified_cap(score, reasons, config)
         return ScoringResult(
             url=url,
             score=score,
@@ -362,7 +667,7 @@ def evaluate_website(
         reasons.append("parked_domain")
 
     # HTTP only (no SSL)
-    if url.startswith("http://") and not final_url.startswith("https://"):
+    if final_url and final_url.startswith("http://"):
         score += config.weight_http_only
         reasons.append("no_https")
 
@@ -408,6 +713,7 @@ def evaluate_website(
         score += weight
         reasons.append(f"diy_{diy_builder}")
 
+    score, reasons = _apply_unverified_cap(score, reasons, config)
     return ScoringResult(
         url=url,
         score=score,
@@ -432,10 +738,14 @@ def evaluate_with_isolation(
         return evaluate_website(url, config, retry_config)
     except Exception as e:
         logger.error(f"Unexpected error evaluating {url}: {e}")
+        config = config or ScoringConfig()
+        score = 100
+        reasons = ["evaluation_error"]
+        score, reasons = _apply_unverified_cap(score, reasons, config)
         return ScoringResult(
             url=url,
-            score=100,  # Assume broken if we can't check
-            reasons=["evaluation_error"],
+            score=score,
+            reasons=reasons,
             http_status=None,
             response_time_ms=None,
             final_url=None,

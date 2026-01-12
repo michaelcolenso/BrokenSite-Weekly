@@ -75,6 +75,25 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
     return csv_content, output_path
 
 
+def generate_manual_review_csv(
+    leads: List[Dict[str, Any]],
+    output_path: Path = None,
+) -> Optional[Path]:
+    """
+    Generate a CSV for manual review (unverified leads).
+    Returns file path or None if no leads.
+    """
+    if not leads:
+        return None
+
+    if output_path is None:
+        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+        output_path = OUTPUT_DIR / f"manual_review_{date_str}.csv"
+
+    generate_csv(leads, output_path=output_path)
+    return output_path
+
+
 def create_email(
     subscriber: Subscriber,
     csv_content: str,

@@ -199,6 +199,20 @@ class Database:
 
             return [dict(row) for row in rows]
 
+    def get_unverified_leads(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Get unverified leads for manual review."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT place_id, cid, name, website, address, phone,
+                       city, category, score, reasons, first_seen
+                FROM leads
+                WHERE reasons LIKE '%unverified%' AND exported_count = 0
+                ORDER BY score DESC, first_seen ASC
+                LIMIT ?
+            """, (limit,)).fetchall()
+
+            return [dict(row) for row in rows]
+
     def mark_exported(self, place_ids: List[str]):
         """Mark leads as exported."""
         now = datetime.utcnow()

@@ -18,7 +18,7 @@ from .db import Database, Lead
 from .maps_scraper import scrape_with_isolation, Business
 from .scoring import evaluate_with_isolation, ScoringResult
 from .gumroad import get_subscribers_with_isolation
-from .delivery import deliver_with_isolation, generate_csv
+from .delivery import deliver_with_isolation, generate_csv, generate_manual_review_csv
 
 logger = get_logger("orchestrator")
 
@@ -51,14 +51,40 @@ def process_business(
     Fully isolated - never raises exceptions.
     """
     try:
-        # Skip if no website
-        if not business.website:
-            logger.debug(f"Skipping {business.name}: no website")
-            return None
-
         # Check for duplicate
         if db.is_duplicate(business.place_id, business.website):
             logger.debug(f"Skipping {business.name}: duplicate")
+            return None
+
+        # Handle no-website leads (optional)
+        if not business.website:
+            if not config.scoring.include_no_website_leads:
+                logger.debug(f"Skipping {business.name}: no website")
+                return None
+
+            lead = Lead(
+                place_id=business.place_id,
+                cid=business.cid,
+                name=business.name,
+                website=None,
+                address=business.address,
+                phone=business.phone,
+                city=business.city,
+                category=business.category,
+                score=config.scoring.weight_no_website,
+                reasons="no_website",
+                first_seen=datetime.utcnow(),
+                last_seen=datetime.utcnow(),
+            )
+            db.upsert_lead(lead)
+
+            if lead.score >= config.scoring.min_score_to_include:
+                logger.info(
+                    f"Lead: {business.name} | no website | "
+                    f"Score: {lead.score} | Reasons: {lead.reasons}"
+                )
+                return lead
+
             return None
 
         run_ctx.increment("websites_checked")
@@ -232,6 +258,28 @@ def run_delivery_phase(
     return success_count > 0 or len(subscribers) == 0
 
 
+def run_manual_review_phase(
+    config: Config,
+    db: Database,
+    run_ctx: RunContext,
+) -> None:
+    """
+    Phase 3: Generate manual review CSV for unverified leads.
+    """
+    if not config.scoring.manual_review_enabled:
+        return
+
+    leads = db.get_unverified_leads(limit=config.scoring.manual_review_limit)
+    if not leads:
+        logger.info("No unverified leads for manual review")
+        return
+
+    output_path = generate_manual_review_csv(leads)
+    if output_path:
+        logger.info(f"Manual review CSV created: {output_path}")
+        run_ctx.stats["manual_review_leads"] = len(leads)
+
+
 def run_weekly(config: Config = None, skip_scrape: bool = False, skip_delivery: bool = False):
     """
     Main weekly run entry point.
@@ -278,6 +326,11 @@ def run_weekly(config: Config = None, skip_scrape: bool = False, skip_delivery: 
             if not skip_delivery:
                 logger.info("=== Phase 2: Delivery ===")
                 run_delivery_phase(config, db, run_ctx)
+
+            # Phase 3: Manual review export
+            if config.scoring.manual_review_enabled:
+                logger.info("=== Phase 3: Manual Review Export ===")
+                run_manual_review_phase(config, db, run_ctx)
 
             # Complete run
             db.complete_run(run_ctx.run_id, run_ctx.stats)

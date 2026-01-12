@@ -82,6 +82,7 @@ class RunContext:
             "websites_checked": 0,
             "leads_exported": 0,
             "emails_sent": 0,
+            "manual_review_leads": 0,
             "errors": 0,
         }
 

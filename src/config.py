@@ -56,10 +56,42 @@ class ScoringConfig:
     weight_weebly: int = 8
     weight_godaddy_builder: int = 10
 
+    # Soft exclusions / unknowns
+    weight_bot_protection: int = 5
+    weight_js_required: int = 5
+
+    # No-website leads (optional)
+    include_no_website_leads: bool = True
+    weight_no_website: int = 60
+    include_social_only_leads: bool = True
+    weight_social_only: int = 60
+
+    # Unknown fetch failures (lower confidence than true unreachable)
+    weight_fetch_failed: int = 70
+    weight_dns_failed: int = 95
+
+    # Unverified leads handling
+    include_unverified_leads: bool = False
+    unverified_reasons: List[str] = field(default_factory=lambda: [
+        "fetch_failed",
+        "timeout",
+        "bot_protection",
+        "js_required",
+    ])
+    unverified_score_cap: int = 39
+
+    # Manual review export for unverified leads
+    manual_review_enabled: bool = True
+    manual_review_limit: int = 200
+
     # Thresholds
     min_score_to_include: int = 40  # Only include leads scoring >= this
     request_timeout_seconds: int = 15
     max_redirects: int = 5
+    allow_scheme_fallback: bool = True
+    playwright_fallback_enabled: bool = True
+    playwright_fallback_timeout_ms: int = 12000
+    dns_check_enabled: bool = True
 
 
 @dataclass
@@ -111,16 +143,16 @@ class Config:
 
     # Search queries - niches to target
     search_queries: List[str] = field(default_factory=lambda: [
-        "plumber near me",
-        "electrician near me",
-        "hvac repair near me",
-        "roofing contractor near me",
-        "landscaping service near me",
-        "auto repair shop near me",
-        "dentist near me",
-        "chiropractor near me",
-        "hair salon near me",
-        "restaurant near me",
+        "plumber",
+        "electrician",
+        "hvac repair",
+        "roofing contractor",
+        "landscaping service",
+        "auto repair shop",
+        "dentist",
+        "chiropractor",
+        "hair salon",
+        "restaurant",
     ])
 
     # Target cities for geographic rotation
