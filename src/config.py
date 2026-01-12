@@ -56,6 +56,12 @@ class ScoringConfig:
     weight_weebly: int = 8
     weight_godaddy_builder: int = 10
 
+    # Performance/redirect signals
+    weight_slow_response: int = 12
+    slow_response_ms_threshold: int = 2500
+    weight_redirect_chain: int = 15
+    redirect_chain_threshold: int = 2
+
     # Thresholds
     min_score_to_include: int = 40  # Only include leads scoring >= this
     request_timeout_seconds: int = 15
