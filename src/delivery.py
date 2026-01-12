@@ -32,6 +32,19 @@ class DeliveryResult:
     error: Optional[str] = None
 
 
+def _sanitize_csv_value(value: Any) -> Any:
+    """Prefix risky spreadsheet formulas with a single quote.
+
+    >>> _sanitize_csv_value("=HYPERLINK('https://example.com')")
+    "'=HYPERLINK('https://example.com')"
+    >>> _sanitize_csv_value("@sum(A1:A2)")
+    "'@sum(A1:A2)"
+    """
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+        return f"'{value}"
+    return value
+
+
 def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple[str, Path]:
     """
     Generate CSV content from leads.
@@ -63,7 +76,10 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
 
     for lead in leads:
         # Ensure all fields exist
-        row = {field: lead.get(field, "") for field in fieldnames}
+        row = {
+            field: _sanitize_csv_value(lead.get(field, ""))
+            for field in fieldnames
+        }
         writer.writerow(row)
 
     csv_content = buffer.getvalue()
