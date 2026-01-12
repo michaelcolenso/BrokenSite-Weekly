@@ -328,12 +328,12 @@ def evaluate_website(
 
     # 4xx client errors (but not 403/404 which might be intentional)
     elif 400 <= http_status < 500 and http_status not in (403, 404):
-        score += 40
+        score += config.weight_4xx_error
         reasons.append(f"client_error_{http_status}")
 
     # Even 403/404 is a problem for a business site
     elif http_status in (403, 404):
-        score += 50
+        score += config.weight_403_404
         reasons.append(f"http_{http_status}")
 
     # === Analyze page content ===
