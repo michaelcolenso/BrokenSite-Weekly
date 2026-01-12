@@ -56,11 +56,6 @@ def process_business(
             logger.debug(f"Skipping {business.name}: no website")
             return None
 
-        # Check for duplicate
-        if db.is_duplicate(business.place_id, business.website):
-            logger.debug(f"Skipping {business.name}: duplicate")
-            return None
-
         run_ctx.increment("websites_checked")
 
         # Score the website
@@ -88,6 +83,9 @@ def process_business(
 
         # Store in database
         is_new = db.upsert_lead(lead)
+        if not is_new:
+            logger.debug(f"Skipping {business.name}: duplicate within window")
+            return None
 
         if result.score >= config.scoring.min_score_to_include:
             logger.info(
