@@ -290,6 +290,9 @@ def evaluate_website(
         response, error = fetch_website(url, config, retry_config)
         if response:
             response_time_ms = int((time.time() - start) * 1000)
+            if response_time_ms > config.slow_response_ms_threshold:
+                score += config.weight_slow_response
+                reasons.append(f"slow_response_{response_time_ms}ms")
 
     # === Hard failures (high score) ===
 
@@ -320,6 +323,11 @@ def evaluate_website(
     # We have a response
     http_status = response.status_code
     final_url = response.url
+
+    redirect_chain_count = len(response.history)
+    if redirect_chain_count > config.redirect_chain_threshold:
+        score += config.weight_redirect_chain
+        reasons.append(f"redirect_chain_{redirect_chain_count}")
 
     # 5xx server errors
     if 500 <= http_status < 600:
