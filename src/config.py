@@ -108,6 +108,9 @@ class Config:
     smtp: SMTPConfig = field(default_factory=SMTPConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    export_limit_per_run: int = field(
+        default_factory=lambda: int(os.environ.get("EXPORT_LIMIT_PER_RUN", "500"))
+    )
 
     # Search queries - niches to target
     search_queries: List[str] = field(default_factory=lambda: [
