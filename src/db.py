@@ -146,44 +146,36 @@ class Database:
 
     def upsert_lead(self, lead: Lead) -> bool:
         """
-        Insert or update a lead. Returns True if this is a new lead.
+        Insert or update a lead. Returns True if this is a new (non-duplicate) lead.
         """
         now = datetime.utcnow()
+        cutoff = now - timedelta(days=self.config.dedupe_window_days)
 
         with self._connect() as conn:
-            # Check if exists
-            existing = conn.execute(
-                "SELECT place_id, first_seen FROM leads WHERE place_id = ?",
-                (lead.place_id,)
-            ).fetchone()
-
-            if existing:
-                # Update existing
-                conn.execute("""
-                    UPDATE leads SET
-                        name = ?, website = ?, address = ?, phone = ?,
-                        city = ?, category = ?, score = ?, reasons = ?,
-                        last_seen = ?, cid = ?
-                    WHERE place_id = ?
-                """, (
-                    lead.name, lead.website, lead.address, lead.phone,
-                    lead.city, lead.category, lead.score, lead.reasons,
-                    now, lead.cid, lead.place_id
-                ))
-                return False
-            else:
-                # Insert new
-                conn.execute("""
-                    INSERT INTO leads (
-                        place_id, cid, name, website, address, phone,
-                        city, category, score, reasons, first_seen, last_seen
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    lead.place_id, lead.cid, lead.name, lead.website,
-                    lead.address, lead.phone, lead.city, lead.category,
-                    lead.score, lead.reasons, now, now
-                ))
-                return True
+            row = conn.execute("""
+                INSERT INTO leads (
+                    place_id, cid, name, website, address, phone,
+                    city, category, score, reasons, first_seen, last_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(place_id) DO UPDATE SET
+                    name = excluded.name,
+                    website = excluded.website,
+                    address = excluded.address,
+                    phone = excluded.phone,
+                    city = excluded.city,
+                    category = excluded.category,
+                    score = excluded.score,
+                    reasons = excluded.reasons,
+                    last_seen = excluded.last_seen,
+                    cid = excluded.cid
+                WHERE leads.last_seen <= ?
+                RETURNING place_id
+            """, (
+                lead.place_id, lead.cid, lead.name, lead.website,
+                lead.address, lead.phone, lead.city, lead.category,
+                lead.score, lead.reasons, now, now, cutoff
+            )).fetchone()
+            return row is not None
 
     def get_unexported_leads(self, min_score: int, limit: int = 500) -> List[Dict[str, Any]]:
         """Get leads that haven't been exported yet, above minimum score."""

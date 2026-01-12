@@ -114,6 +114,9 @@ def process_business(
 
         # Store in database
         is_new = db.upsert_lead(lead)
+        if not is_new:
+            logger.debug(f"Skipping {business.name}: duplicate within window")
+            return None
 
         if result.score >= config.scoring.min_score_to_include:
             logger.info(
