@@ -258,6 +258,27 @@ Low effort, immediate impact:
 - [ ] Remove "near me" from queries
 - [ ] Move `import time` to module level
 
+#### Phase 1 Detailed Task List (handoff-ready)
+
+**Scoring quick wins**
+- [ ] Add `slow_response_ms_threshold` + `slow_response_weight` to `config.py`, wire into `scoring.py` to score when `response_time_ms` exceeds threshold.
+- [ ] Track redirect count in `scoring.py` using `len(response.history)` and add configurable weight.
+- [ ] Parse `Last-Modified` header; add helper to compute age in years and score if > configured cutoff.
+- [ ] Add guards to avoid double-scoring and ensure reasons list includes human-readable text for each new signal.
+
+**Maps data extraction**
+- [ ] Extend `maps_scraper.py` result payload to include `review_count` (and validate it is persisted in `db.py`).
+- [ ] Update `delivery.py` export columns to include `review_count` and add to CSV output ordering.
+
+**Data safety + cleanup**
+- [ ] Sanitize CSV values in `delivery.py` to prevent formula injection (prefix `'` for `=`, `+`, `-`, `@`).
+- [ ] Remove "near me" from query composition in `config.py` when city is specified.
+- [ ] Move `import time` to module top in `scoring.py` and ensure lints/tests still pass.
+
+**Validation**
+- [ ] Add/extend unit tests for new scoring signals.
+- [ ] Run `--validate` mode to ensure no runtime regressions.
+
 ### Phase 2: Core Improvements (Week 2-3)
 
 Medium effort, high value:
@@ -272,6 +293,26 @@ Medium effort, high value:
 - [ ] Fix Playwright resource leak
 - [ ] Add unit tests for scoring
 
+#### Phase 2 Detailed Task List (handoff-ready)
+
+**Reliability + correctness**
+- [ ] Fix DB race condition by wrapping duplicate check + upsert in a single transaction; add a unique index on `place_id` if missing.
+- [ ] Refactor Playwright usage to context manager pattern (`async with` / `with`) to ensure browser and pages close cleanly.
+
+**Site health detection**
+- [ ] Implement SSL expiry lookup (socket + cert parsing); add configurable threshold + weight in `config.py`.
+- [ ] Implement broken image detection with a capped sample size (e.g., first 10 images), HEAD requests, timeouts, and weight per broken image.
+- [ ] Add missing phone/email detection via regex; include separate weights for each missing item.
+- [ ] Add SEO checks: empty/generic `<title>`, missing meta description, missing `<h1>`; make weights configurable.
+- [ ] Expand "under construction" / parked domain patterns list and add tests for positive matches.
+
+**Advertising detection**
+- [ ] Detect GTM/GA/FB Pixel tags in HTML; flag `has_advertising` in scoring and output.
+
+**Testing**
+- [ ] Add unit tests for all new signals and thresholds.
+- [ ] Add integration smoke test on a known sample HTML fixture set.
+
 ### Phase 3: Enrichment (Week 4-5)
 
 Higher effort, differentiation:
@@ -284,6 +325,23 @@ Higher effort, differentiation:
 - [ ] Pitch suggestion generation
 - [ ] Market saturation reports
 
+#### Phase 3 Detailed Task List (handoff-ready)
+
+**Enrichment data sources**
+- [ ] Build HTML-based extractor for owner/decision-maker names from "About" and "Team" sections.
+- [ ] Implement competitor scraping from Maps: capture top 3 by reviews in same niche/city.
+- [ ] Add phone mismatch detection by normalizing and comparing Maps vs website numbers.
+- [ ] Add dead social link checks with HEAD/GET validation and timeouts.
+
+**Lead packaging**
+- [ ] Add lead tier classification (Hot/Warm/Cool/Skip) based on score ranges.
+- [ ] Implement pitch suggestion generator using detected issues; store suggested pitch text.
+- [ ] Add market saturation report generator to produce per-city/niche summaries.
+
+**Exports**
+- [ ] Extend CSV schema with new enrichment fields and ensure DB schema includes columns.
+- [ ] Update email template to highlight tiers and top insights.
+
 ### Phase 4: Product Expansion (Week 6+)
 
 New features:
@@ -294,6 +352,22 @@ New features:
 - [ ] Week-over-week change detection
 - [ ] Enhanced CSV output format
 - [ ] Weekly summary email
+
+#### Phase 4 Detailed Task List (handoff-ready)
+
+**Subscriber personalization**
+- [ ] Add preference fields (niche include/exclude, cities, min review count) in subscriber model.
+- [ ] Filter lead export per subscriber based on preferences and tiers.
+- [ ] Add admin tooling to view/edit subscriber preferences.
+
+**External integrations**
+- [ ] Integrate Google PageSpeed API with caching and rate limiting.
+- [ ] Add Yelp lookup for business verification and enrichment.
+
+**Product analytics**
+- [ ] Implement week-over-week change detection for lead status and scoring deltas.
+- [ ] Expand CSV output format to include enrichment, tiers, and pitch suggestions.
+- [ ] Add weekly summary email with aggregate metrics + highlights.
 
 ---
 
