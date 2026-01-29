@@ -42,6 +42,8 @@ class ScoringConfig:
     weight_5xx_error: int = 85
     weight_ssl_error: int = 80
     weight_parked_domain: int = 75
+    weight_4xx_error: int = 40
+    weight_403_404: int = 50
 
     # Medium signals (outdated tech, poor mobile)
     weight_http_only: int = 30
