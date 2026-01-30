@@ -200,7 +200,7 @@ def run_delivery_phase(
     # Get unexported leads from database
     leads_data = db.get_unexported_leads(
         min_score=config.scoring.min_score_to_include,
-        limit=500,
+        limit=config.export_limit_per_run,
     )
 
     if not leads_data:
