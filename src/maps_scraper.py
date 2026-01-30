@@ -346,115 +346,113 @@ def scrape_businesses(
     logger.info(f"Scraping: {query}")
     results: List[Business] = []
 
-    browser: Optional[Browser] = None
-    context: Optional[BrowserContext] = None
+    # Use context manager pattern to ensure proper cleanup
+    with sync_playwright() as playwright:
+        browser: Optional[Browser] = None
+        context: Optional[BrowserContext] = None
 
-    try:
-        playwright = sync_playwright().start()
-
-        browser = playwright.chromium.launch(
-            headless=config.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-            ]
-        )
-
-        context = browser.new_context(
-            user_agent=config.user_agent,
-            viewport={"width": 1920, "height": 1080},
-            locale="en-US",
-            timezone_id="America/Chicago",
-        )
-
-        # Set default timeout
-        context.set_default_timeout(config.timeout_ms)
-
-        page = context.new_page()
-
-        # Navigate to Maps
-        page.goto(url, wait_until="domcontentloaded")
-        logger.debug(f"Navigated to: {url}")
-
-        # Handle consent dialog
-        _handle_consent(page, config)
-
-        # Wait for results to appear
-        feed = _try_selectors(page, SELECTORS["results_feed"], timeout=config.timeout_ms)
-        if not feed:
-            logger.warning(f"No results feed found for: {query}")
-            _save_debug_dump(page, f"no_feed_{query}", config)
-            return results
-
-        # Scroll to load more results
-        _scroll_results(page, config)
-
-        # Get all business cards
-        cards = _query_all_selectors(page, SELECTORS["business_cards"])
-        logger.info(f"Found {len(cards)} business cards for: {query}")
-
-        if not cards:
-            _save_debug_dump(page, f"no_cards_{query}", config)
-            return results
-
-        # Process each card
-        seen_place_ids = set()
-
-        for i, card in enumerate(cards[:max_results]):
-            try:
-                # Click on card to open detail panel
-                card.click()
-                time.sleep(1)
-
-                # Extract details
-                business = _extract_business_details(page, city, category, config)
-
-                if business and business.place_id not in seen_place_ids:
-                    seen_place_ids.add(business.place_id)
-                    results.append(business)
-                    logger.debug(f"Extracted: {business.name} ({business.website or 'no website'})")
-
-            except PlaywrightError as e:
-                logger.debug(f"Error processing card {i}: {e}")
-                continue
-
-            # Brief pause between cards
-            time.sleep(0.5)
-
-        logger.info(f"Successfully scraped {len(results)} businesses for: {query}")
-        return results
-
-    except PlaywrightTimeout as e:
-        logger.error(f"Timeout scraping {query}: {e}")
-        if 'page' in locals():
-            _save_debug_dump(page, f"timeout_{query}", config)
-        raise ScraperError(f"Timeout: {e}")
-
-    except PlaywrightError as e:
-        logger.error(f"Playwright error scraping {query}: {e}")
-        if 'page' in locals():
-            _save_debug_dump(page, f"error_{query}", config)
-        raise ScraperError(f"Playwright error: {e}")
-
-    except Exception as e:
-        logger.error(f"Unexpected error scraping {query}: {e}")
-        if 'page' in locals():
-            _save_debug_dump(page, f"unexpected_{query}", config)
-        raise
-
-    finally:
-        # Deterministic cleanup
         try:
-            if context:
-                context.close()
-            if browser:
-                browser.close()
-            if 'playwright' in locals():
-                playwright.stop()
+            browser = playwright.chromium.launch(
+                headless=config.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ]
+            )
+
+            context = browser.new_context(
+                user_agent=config.user_agent,
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+                timezone_id="America/Chicago",
+            )
+
+            # Set default timeout
+            context.set_default_timeout(config.timeout_ms)
+
+            page = context.new_page()
+
+            # Navigate to Maps
+            page.goto(url, wait_until="domcontentloaded")
+            logger.debug(f"Navigated to: {url}")
+
+            # Handle consent dialog
+            _handle_consent(page, config)
+
+            # Wait for results to appear
+            feed = _try_selectors(page, SELECTORS["results_feed"], timeout=config.timeout_ms)
+            if not feed:
+                logger.warning(f"No results feed found for: {query}")
+                _save_debug_dump(page, f"no_feed_{query}", config)
+                return results
+
+            # Scroll to load more results
+            _scroll_results(page, config)
+
+            # Get all business cards
+            cards = _query_all_selectors(page, SELECTORS["business_cards"])
+            logger.info(f"Found {len(cards)} business cards for: {query}")
+
+            if not cards:
+                _save_debug_dump(page, f"no_cards_{query}", config)
+                return results
+
+            # Process each card
+            seen_place_ids = set()
+
+            for i, card in enumerate(cards[:max_results]):
+                try:
+                    # Click on card to open detail panel
+                    card.click()
+                    time.sleep(1)
+
+                    # Extract details
+                    business = _extract_business_details(page, city, category, config)
+
+                    if business and business.place_id not in seen_place_ids:
+                        seen_place_ids.add(business.place_id)
+                        results.append(business)
+                        logger.debug(f"Extracted: {business.name} ({business.website or 'no website'})")
+
+                except PlaywrightError as e:
+                    logger.debug(f"Error processing card {i}: {e}")
+                    continue
+
+                # Brief pause between cards
+                time.sleep(0.5)
+
+            logger.info(f"Successfully scraped {len(results)} businesses for: {query}")
+            return results
+
+        except PlaywrightTimeout as e:
+            logger.error(f"Timeout scraping {query}: {e}")
+            if 'page' in locals():
+                _save_debug_dump(page, f"timeout_{query}", config)
+            raise ScraperError(f"Timeout: {e}")
+
+        except PlaywrightError as e:
+            logger.error(f"Playwright error scraping {query}: {e}")
+            if 'page' in locals():
+                _save_debug_dump(page, f"error_{query}", config)
+            raise ScraperError(f"Playwright error: {e}")
+
         except Exception as e:
-            logger.warning(f"Error during cleanup: {e}")
+            logger.error(f"Unexpected error scraping {query}: {e}")
+            if 'page' in locals():
+                _save_debug_dump(page, f"unexpected_{query}", config)
+            raise
+
+        finally:
+            # Cleanup browser and context (playwright cleanup is handled by context manager)
+            try:
+                if context:
+                    context.close()
+                if browser:
+                    browser.close()
+            except Exception as e:
+                logger.warning(f"Error during cleanup: {e}")
 
 
 def scrape_with_isolation(

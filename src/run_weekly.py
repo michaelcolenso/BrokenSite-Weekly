@@ -44,15 +44,19 @@ def process_business(
     db: Database,
     config: Config,
     run_ctx: RunContext,
+    dry_run: bool = False,
 ) -> Optional[Lead]:
     """
     Process a single business: check website, score, store.
     Returns Lead if it qualifies, None otherwise.
     Fully isolated - never raises exceptions.
+
+    Args:
+        dry_run: If True, skip database writes (scoring still happens).
     """
     try:
-        # Check for duplicate
-        if db.is_duplicate(business.place_id, business.website):
+        # Check for duplicate (skip in dry-run to show what would be processed)
+        if not dry_run and db.is_duplicate(business.place_id, business.website):
             logger.debug(f"Skipping {business.name}: duplicate")
             return None
 
@@ -76,7 +80,8 @@ def process_business(
                 first_seen=datetime.utcnow(),
                 last_seen=datetime.utcnow(),
             )
-            db.upsert_lead(lead)
+            if not dry_run:
+                db.upsert_lead(lead)
 
             if lead.score >= config.scoring.min_score_to_include:
                 logger.info(
@@ -112,11 +117,14 @@ def process_business(
             last_seen=datetime.utcnow(),
         )
 
-        # Store in database
-        is_new = db.upsert_lead(lead)
-        if not is_new:
-            logger.debug(f"Skipping {business.name}: duplicate within window")
-            return None
+        # Store in database (skip in dry-run mode)
+        if dry_run:
+            is_new = True  # Assume new in dry-run
+        else:
+            is_new = db.upsert_lead(lead)
+            if not is_new:
+                logger.debug(f"Skipping {business.name}: duplicate within window")
+                return None
 
         if result.score >= config.scoring.min_score_to_include:
             logger.info(
@@ -141,10 +149,14 @@ def run_scraping_phase(
     db: Database,
     run_ctx: RunContext,
     shutdown: GracefulShutdown,
+    dry_run: bool = False,
 ) -> list:
     """
     Phase 1: Scrape Google Maps and score websites.
     Returns list of qualifying leads.
+
+    Args:
+        dry_run: If True, skip database writes.
     """
     qualifying_leads = []
 
@@ -179,7 +191,7 @@ def run_scraping_phase(
                 if shutdown.check():
                     break
 
-                lead = process_business(business, db, config, run_ctx)
+                lead = process_business(business, db, config, run_ctx, dry_run=dry_run)
                 if lead:
                     qualifying_leads.append(lead)
 
@@ -190,10 +202,14 @@ def run_delivery_phase(
     config: Config,
     db: Database,
     run_ctx: RunContext,
+    dry_run: bool = False,
 ) -> bool:
     """
     Phase 2: Get subscribers and deliver CSV.
     Returns True if delivery succeeded.
+
+    Args:
+        dry_run: If True, skip actual SMTP sends and database updates.
     """
     # Get unexported leads from database
     leads_data = db.get_unexported_leads(
@@ -223,6 +239,15 @@ def run_delivery_phase(
         return True
 
     logger.info(f"Delivering to {len(subscribers)} subscribers")
+
+    # In dry-run mode, just log what would happen
+    if dry_run:
+        logger.info(f"[DRY-RUN] Would deliver {len(leads_data)} leads to {len(subscribers)} subscribers:")
+        for sub in subscribers:
+            logger.info(f"[DRY-RUN]   - {sub.email}")
+        run_ctx.stats["emails_sent"] = 0
+        run_ctx.stats["leads_exported"] = 0
+        return True
 
     # Deliver to subscribers
     results, delivery_error = deliver_with_isolation(
@@ -283,7 +308,12 @@ def run_manual_review_phase(
         run_ctx.stats["manual_review_leads"] = len(leads)
 
 
-def run_weekly(config: Config = None, skip_scrape: bool = False, skip_delivery: bool = False):
+def run_weekly(
+    config: Config = None,
+    skip_scrape: bool = False,
+    skip_delivery: bool = False,
+    dry_run: bool = False,
+):
     """
     Main weekly run entry point.
 
@@ -291,7 +321,10 @@ def run_weekly(config: Config = None, skip_scrape: bool = False, skip_delivery: 
         config: Configuration (loads from env if not provided)
         skip_scrape: Skip scraping phase (use existing DB leads)
         skip_delivery: Skip delivery phase (scrape only)
+        dry_run: Skip all database writes and email sends (for testing)
     """
+    if dry_run:
+        logger.info("=== DRY-RUN MODE: No database writes or emails will be sent ===")
     # Setup
     setup_logging()
     shutdown = GracefulShutdown()
@@ -312,40 +345,44 @@ def run_weekly(config: Config = None, skip_scrape: bool = False, skip_delivery: 
 
     # Run with context tracking
     with RunContext(logger) as run_ctx:
-        db.start_run(run_ctx.run_id)
+        if not dry_run:
+            db.start_run(run_ctx.run_id)
 
         try:
             # Phase 1: Scraping
             if not skip_scrape:
                 logger.info("=== Phase 1: Scraping ===")
-                run_scraping_phase(config, db, run_ctx, shutdown)
+                run_scraping_phase(config, db, run_ctx, shutdown, dry_run=dry_run)
 
                 if shutdown.check():
                     logger.warning("Shutdown during scrape phase")
-                    db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
+                    if not dry_run:
+                        db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
 
             # Phase 2: Delivery
             if not skip_delivery:
                 logger.info("=== Phase 2: Delivery ===")
-                run_delivery_phase(config, db, run_ctx)
+                run_delivery_phase(config, db, run_ctx, dry_run=dry_run)
 
-            # Phase 3: Manual review export
-            if config.scoring.manual_review_enabled:
+            # Phase 3: Manual review export (skip in dry-run)
+            if config.scoring.manual_review_enabled and not dry_run:
                 logger.info("=== Phase 3: Manual Review Export ===")
                 run_manual_review_phase(config, db, run_ctx)
 
-            # Complete run
-            db.complete_run(run_ctx.run_id, run_ctx.stats)
+            # Complete run (skip in dry-run)
+            if not dry_run:
+                db.complete_run(run_ctx.run_id, run_ctx.stats)
 
-            # Periodic cleanup
-            db.cleanup_old_leads(days=180)
+                # Periodic cleanup
+                db.cleanup_old_leads(days=180)
 
             logger.info("Weekly run completed successfully")
 
         except Exception as e:
             logger.exception(f"Fatal error in weekly run: {e}")
-            db.complete_run(run_ctx.run_id, run_ctx.stats, str(e))
+            if not dry_run:
+                db.complete_run(run_ctx.run_id, run_ctx.stats, str(e))
             raise
 
 
@@ -356,10 +393,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m src.run_weekly              # Full run: scrape + deliver
+  python -m src.run_weekly                  # Full run: scrape + deliver
   python -m src.run_weekly --scrape-only    # Scrape only, no delivery
   python -m src.run_weekly --deliver-only   # Deliver existing leads only
+  python -m src.run_weekly --dry-run        # Test run with no side effects
+  python -m src.run_weekly --scrape-only --dry-run  # Test scraping only
   python -m src.run_weekly --stats          # Show database stats
+  python -m src.run_weekly --validate       # Check configuration
         """
     )
 
@@ -382,6 +422,11 @@ Examples:
         "--validate",
         action="store_true",
         help="Validate configuration and exit",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run without database writes or email sends (for testing)",
     )
 
     args = parser.parse_args()
@@ -415,6 +460,7 @@ Examples:
         config=config,
         skip_scrape=args.deliver_only,
         skip_delivery=args.scrape_only,
+        dry_run=args.dry_run,
     )
 
 

@@ -11,6 +11,7 @@ Scoring philosophy:
 import re
 import ssl
 import socket
+import time
 from datetime import datetime
 from typing import Tuple, List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -526,14 +527,12 @@ def evaluate_website(
 
     # Fetch if no response provided
     if response is None:
-        import time
         start = time.time()
         response, error = fetch_website(url, config, retry_config)
         if response:
             response_time_ms = int((time.time() - start) * 1000)
 
     if error and config.playwright_fallback_enabled and _should_attempt_playwright(error):
-        import time
         fallback_start = time.time()
         fallback_response, fallback_error = _fetch_with_playwright(url, config)
         if fallback_response:
