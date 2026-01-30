@@ -64,6 +64,7 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
         "reasons",
         "address",
         "phone",
+        "review_count",
         "city",
         "category",
         "place_id",
