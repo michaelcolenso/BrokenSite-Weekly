@@ -24,6 +24,7 @@ class Lead:
     website: Optional[str]
     address: Optional[str]
     phone: Optional[str]
+    review_count: Optional[int]
     city: str
     category: str
     score: int
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS leads (
     website TEXT,
     address TEXT,
     phone TEXT,
+    review_count INTEGER,
     city TEXT NOT NULL,
     category TEXT NOT NULL,
     score INTEGER NOT NULL,
@@ -150,7 +152,16 @@ class Database:
         """Initialize database schema."""
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            self._ensure_columns(conn)
             logger.info(f"Database initialized at {self.db_path}")
+
+    def _ensure_columns(self, conn: sqlite3.Connection) -> None:
+        """Ensure new columns exist for backward compatibility."""
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(leads)").fetchall()
+        }
+        if "review_count" not in columns:
+            conn.execute("ALTER TABLE leads ADD COLUMN review_count INTEGER")
 
     @contextmanager
     def _connect(self):
@@ -207,13 +218,14 @@ class Database:
             row = conn.execute("""
                 INSERT INTO leads (
                     place_id, cid, name, website, address, phone,
-                    city, category, score, reasons, first_seen, last_seen
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_count, city, category, score, reasons, first_seen, last_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(place_id) DO UPDATE SET
                     name = excluded.name,
                     website = excluded.website,
                     address = excluded.address,
                     phone = excluded.phone,
+                    review_count = excluded.review_count,
                     city = excluded.city,
                     category = excluded.category,
                     score = excluded.score,
@@ -224,7 +236,7 @@ class Database:
                 RETURNING place_id
             """, (
                 lead.place_id, lead.cid, lead.name, lead.website,
-                lead.address, lead.phone, lead.city, lead.category,
+                lead.address, lead.phone, lead.review_count, lead.city, lead.category,
                 lead.score, lead.reasons, now, now, cutoff
             )).fetchone()
             return row is not None
@@ -233,7 +245,7 @@ class Database:
         """Get leads that haven't been exported yet, above minimum score."""
         with self._connect() as conn:
             rows = conn.execute("""
-                SELECT place_id, cid, name, website, address, phone,
+                SELECT place_id, cid, name, website, address, phone, review_count,
                        city, category, score, reasons, first_seen
                 FROM leads
                 WHERE score >= ? AND exported_count = 0 AND website IS NOT NULL
@@ -247,7 +259,7 @@ class Database:
         """Get unverified leads for manual review."""
         with self._connect() as conn:
             rows = conn.execute("""
-                SELECT place_id, cid, name, website, address, phone,
+                SELECT place_id, cid, name, website, address, phone, review_count,
                        city, category, score, reasons, first_seen
                 FROM leads
                 WHERE reasons LIKE '%unverified%' AND exported_count = 0

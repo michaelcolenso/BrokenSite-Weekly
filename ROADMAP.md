@@ -250,33 +250,33 @@ has_advertising, ssl_expires_days, competitor_1, competitor_2, competitor_3
 
 Low effort, immediate impact:
 
-- [ ] Score slow response time (already have data)
-- [ ] Score redirect chain length
-- [ ] Check Last-Modified header
-- [ ] Extract review count from Maps
-- [ ] Fix CSV injection vulnerability
-- [ ] Remove "near me" from queries
-- [ ] Move `import time` to module level
+- [x] Score slow response time (already have data)
+- [x] Score redirect chain length
+- [x] Check Last-Modified header
+- [x] Extract review count from Maps
+- [x] Fix CSV injection vulnerability
+- [x] Remove "near me" from queries
+- [x] Move `import time` to module level
 
 #### Phase 1 Detailed Task List (handoff-ready)
 
 **Scoring quick wins**
-- [ ] Add `slow_response_ms_threshold` + `slow_response_weight` to `config.py`, wire into `scoring.py` to score when `response_time_ms` exceeds threshold.
-- [ ] Track redirect count in `scoring.py` using `len(response.history)` and add configurable weight.
-- [ ] Parse `Last-Modified` header; add helper to compute age in years and score if > configured cutoff.
-- [ ] Add guards to avoid double-scoring and ensure reasons list includes human-readable text for each new signal.
+- [x] Add `slow_response_ms_threshold` + `slow_response_weight` to `config.py`, wire into `scoring.py` to score when `response_time_ms` exceeds threshold.
+- [x] Track redirect count in `scoring.py` using `len(response.history)` and add configurable weight.
+- [x] Parse `Last-Modified` header; add helper to compute age in years and score if > configured cutoff.
+- [x] Add guards to avoid double-scoring and ensure reasons list includes human-readable text for each new signal.
 
 **Maps data extraction**
-- [ ] Extend `maps_scraper.py` result payload to include `review_count` (and validate it is persisted in `db.py`).
-- [ ] Update `delivery.py` export columns to include `review_count` and add to CSV output ordering.
+- [x] Extend `maps_scraper.py` result payload to include `review_count` (and validate it is persisted in `db.py`).
+- [x] Update `delivery.py` export columns to include `review_count` and add to CSV output ordering.
 
 **Data safety + cleanup**
-- [ ] Sanitize CSV values in `delivery.py` to prevent formula injection (prefix `'` for `=`, `+`, `-`, `@`).
-- [ ] Remove "near me" from query composition in `config.py` when city is specified.
-- [ ] Move `import time` to module top in `scoring.py` and ensure lints/tests still pass.
+- [x] Sanitize CSV values in `delivery.py` to prevent formula injection (prefix `'` for `=`, `+`, `-`, `@`).
+- [x] Remove "near me" from query composition in `config.py` when city is specified.
+- [x] Move `import time` to module top in `scoring.py` and ensure lints/tests still pass.
 
 **Validation**
-- [ ] Add/extend unit tests for new scoring signals.
+- [x] Add/extend unit tests for new scoring signals.
 - [ ] Run `--validate` mode to ensure no runtime regressions.
 
 ### Phase 2: Core Improvements (Week 2-3)

@@ -35,6 +35,7 @@ class Business:
     website: Optional[str]
     address: Optional[str]
     phone: Optional[str]
+    review_count: Optional[int]
     city: str
     category: str
 
@@ -103,6 +104,12 @@ SELECTORS = {
         "[data-item-id*='phone']",
         "button[aria-label*='Phone']",
     ],
+    # Review count
+    "review_count": [
+        "button[aria-label*='reviews']",
+        "span[aria-label*='reviews']",
+        "span[aria-label*='review']",
+    ],
 }
 
 
@@ -159,6 +166,13 @@ def _extract_cid_from_url(url: str) -> Optional[str]:
     if match:
         return match.group(1)
     return None
+
+
+def _clean_category_for_city(category: str) -> str:
+    """Remove redundant 'near me' when a city is specified."""
+    cleaned = re.sub(r"\bnear me\b", "", category, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned or category
 
 
 def _save_debug_dump(page: Page, context: str, config: ScraperConfig):
@@ -302,6 +316,16 @@ def _extract_business_details(page: Page, city: str, category: str, config: Scra
             phone = phone_el.get_attribute("aria-label") or phone_el.inner_text()
             phone = phone.replace("Phone: ", "").strip() if phone else None
 
+        # Extract review count
+        review_count = None
+        review_el = _try_selectors(page, SELECTORS["review_count"], timeout=1000)
+        if review_el:
+            review_text = review_el.get_attribute("aria-label") or review_el.inner_text()
+            if review_text:
+                match = re.search(r"([0-9][0-9,]*)", review_text)
+                if match:
+                    review_count = int(match.group(1).replace(",", ""))
+
         return Business(
             place_id=place_id,
             cid=cid,
@@ -309,6 +333,7 @@ def _extract_business_details(page: Page, city: str, category: str, config: Scra
             website=website,
             address=address,
             phone=phone,
+            review_count=review_count,
             city=city,
             category=category,
         )
@@ -339,7 +364,8 @@ def scrape_businesses(
     config = config or ScraperConfig()
     max_results = max_results or config.max_results_per_query
 
-    query = f"{category} in {city}"
+    cleaned_category = _clean_category_for_city(category)
+    query = f"{cleaned_category} in {city}"
     encoded_query = urllib.parse.quote(query)
     url = f"https://www.google.com/maps/search/{encoded_query}"
 

@@ -12,7 +12,7 @@ import re
 import ssl
 import socket
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Tuple, List, Optional, Dict, Any
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -188,6 +188,26 @@ def _extract_copyright_year(html: str) -> Optional[int]:
         years_found.extend(int(y) for y in matches if 1990 <= int(y) <= datetime.now().year + 1)
 
     return max(years_found) if years_found else None
+
+
+def _parse_last_modified_years(headers: Dict[str, Any]) -> Optional[float]:
+    """Return age in years from Last-Modified header if available."""
+    if not headers:
+        return None
+    last_modified = None
+    if isinstance(headers, dict):
+        last_modified = headers.get("Last-Modified") or headers.get("last-modified")
+    if not last_modified:
+        return None
+    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S GMT"):
+        try:
+            parsed = datetime.strptime(last_modified, fmt)
+            parsed = parsed.replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - parsed).days
+            return age_days / 365.25
+        except ValueError:
+            continue
+    return None
 
 
 def _check_parked_domain(html: str) -> bool:
@@ -603,8 +623,31 @@ def evaluate_website(
     # We have a response
     http_status = response.status_code
     final_url = response.url
+    if response_time_ms is None:
+        try:
+            response_time_ms = int(response.elapsed.total_seconds() * 1000)
+        except Exception:
+            response_time_ms = None
 
     # === Analyze page content ===
+    if response_time_ms is not None and response_time_ms >= config.slow_response_ms_threshold:
+        score += config.weight_slow_response
+        reasons.append(f"slow_response_{response_time_ms}ms")
+
+    redirect_count = 0
+    try:
+        redirect_count = len(response.history or [])
+    except Exception:
+        redirect_count = 0
+
+    if redirect_count >= config.redirect_chain_length_threshold:
+        score += config.weight_redirect_chain
+        reasons.append(f"redirect_chain_{redirect_count}")
+
+    last_modified_years = _parse_last_modified_years(getattr(response, "headers", None))
+    if last_modified_years is not None and last_modified_years >= config.last_modified_years_threshold:
+        score += config.weight_last_modified_stale
+        reasons.append(f"last_modified_{last_modified_years:.1f}y")
 
     try:
         html = response.text

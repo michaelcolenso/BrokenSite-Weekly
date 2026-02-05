@@ -43,6 +43,14 @@ class ScoringConfig:
     weight_ssl_error: int = 80
     weight_parked_domain: int = 75
 
+    # Quick-win signals
+    slow_response_ms_threshold: int = 5000
+    weight_slow_response: int = 20
+    redirect_chain_length_threshold: int = 3
+    weight_redirect_chain: int = 15
+    last_modified_years_threshold: int = 2
+    weight_last_modified_stale: int = 20
+
     # Medium signals (outdated tech, poor mobile)
     weight_http_only: int = 30
     weight_outdated_copyright: int = 25  # Copyright year > 2 years old
