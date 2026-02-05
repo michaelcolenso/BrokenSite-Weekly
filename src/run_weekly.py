@@ -21,8 +21,9 @@ from .gumroad import get_subscribers_with_isolation
 from .delivery import deliver_with_isolation, generate_csv, generate_manual_review_csv
 from .audit_generator import generate_audit_page, get_issues_json
 from .contact_finder import find_contact_with_isolation
-from .outreach import run_outreach
+from .outreach import run_outreach, run_followups
 from .warm_delivery import deliver_warm_leads_with_isolation
+from .lead_utils import compute_lead_tier, compute_exclusive_until
 
 logger = get_logger("orchestrator")
 
@@ -84,6 +85,7 @@ def process_business(
                 reasons="no_website",
                 first_seen=datetime.utcnow(),
                 last_seen=datetime.utcnow(),
+                lead_tier=compute_lead_tier(config.scoring.weight_no_website),
             )
             if not dry_run:
                 db.upsert_lead(lead)
@@ -106,6 +108,20 @@ def process_business(
             retry_config=config.retry,
         )
 
+        reasons_str = ",".join(result.reasons)
+        lead_tier = compute_lead_tier(result.score)
+        exclusive_until = None
+        exclusive_tier = None
+        if (
+            result.score >= 70
+            and business.review_count is not None
+            and business.review_count >= 15
+            and business.website
+            and "unverified" not in result.reasons
+        ):
+            exclusive_until = compute_exclusive_until(days=7)
+            exclusive_tier = "pro"
+
         # Create lead record
         lead = Lead(
             place_id=business.place_id,
@@ -118,9 +134,12 @@ def process_business(
             city=business.city,
             category=business.category,
             score=result.score,
-            reasons=",".join(result.reasons),
+            reasons=reasons_str,
             first_seen=datetime.utcnow(),
             last_seen=datetime.utcnow(),
+            exclusive_until=exclusive_until,
+            exclusive_tier=exclusive_tier,
+            lead_tier=lead_tier,
         )
 
         # Store in database (skip in dry-run mode)
@@ -217,19 +236,7 @@ def run_delivery_phase(
     Args:
         dry_run: If True, skip actual SMTP sends and database updates.
     """
-    # Get unexported leads from database
-    leads_data = db.get_unexported_leads(
-        min_score=config.scoring.min_score_to_include,
-        limit=500,
-    )
-
-    if not leads_data:
-        logger.info("No new leads to deliver")
-        return True
-
-    logger.info(f"Found {len(leads_data)} unexported leads")
-
-    # Get active subscribers
+    # Fetch subscribers with tiers
     subscribers, sub_error = get_subscribers_with_isolation(
         config=config.gumroad,
         retry_config=config.retry,
@@ -244,52 +251,111 @@ def run_delivery_phase(
         logger.warning("No active subscribers found")
         return True
 
-    logger.info(f"Delivering to {len(subscribers)} subscribers")
+    pro_subs = [s for s in subscribers if s.tier == "pro"]
+    basic_subs = [s for s in subscribers if s.tier != "pro"]
 
-    # In dry-run mode, just log what would happen
+    # Fetch leads by tier
+    leads_pro = db.get_unexported_leads_for_tier(
+        min_score=config.scoring.min_score_to_include,
+        tier="pro",
+        limit=500,
+    )
+    leads_basic = db.get_unexported_leads_for_tier(
+        min_score=config.scoring.min_score_to_include,
+        tier="basic",
+        limit=500,
+    )
+
+    if not leads_pro and not leads_basic:
+        logger.info("No new leads to deliver")
+        return True
+
+    # Prepare portal config fallback
+    portal_config = config.portal
+    if portal_config and not portal_config.base_url:
+        portal_config.base_url = config.outreach.tracking_base_url
+
+    # Dry-run logging
     if dry_run:
-        logger.info(f"[DRY-RUN] Would deliver {len(leads_data)} leads to {len(subscribers)} subscribers:")
-        for sub in subscribers:
-            logger.info(f"[DRY-RUN]   - {sub.email}")
+        if leads_pro:
+            logger.info(f"[DRY-RUN] Would deliver {len(leads_pro)} pro leads to {len(pro_subs)} pro subscribers")
+        if leads_basic:
+            logger.info(f"[DRY-RUN] Would deliver {len(leads_basic)} basic leads to {len(basic_subs)} basic subscribers")
         run_ctx.stats["emails_sent"] = 0
         run_ctx.stats["leads_exported"] = 0
         return True
 
-    # Deliver to subscribers
-    results, delivery_error = deliver_with_isolation(
-        subscribers=subscribers,
-        leads=leads_data,
-        config=config.smtp,
-        retry_config=config.retry,
-    )
+    total_emails_sent = 0
+    total_leads_exported = 0
 
-    if delivery_error:
-        logger.error(f"Delivery system error: {delivery_error}")
-        run_ctx.increment("errors")
-        return False
+    # Deliver to Pro tier
+    if pro_subs and leads_pro:
+        results, delivery_error = deliver_with_isolation(
+            subscribers=pro_subs,
+            leads=leads_pro,
+            config=config.smtp,
+            retry_config=config.retry,
+            portal_config=portal_config,
+            csv_label="pro",
+        )
+        if delivery_error:
+            logger.error(f"Pro delivery error: {delivery_error}")
+            run_ctx.increment("errors")
+        else:
+            success_count = sum(1 for r in results if r.success)
+            total_emails_sent += success_count
+            if success_count > 0:
+                total_leads_exported += len(leads_pro)
+                place_ids = [lead["place_id"] for lead in leads_pro]
+                db.mark_exported(place_ids, tier="pro")
+                logger.info(f"Marked {len(place_ids)} pro leads as exported")
+            for result in results:
+                if result.success:
+                    db.record_export(
+                        run_id=run_ctx.run_id,
+                        subscriber_email=result.subscriber_email,
+                        lead_count=len(leads_pro),
+                        csv_path=result.csv_path or "",
+                        tier="pro",
+                        export_type="cold",
+                    )
 
-    # Count successes
-    success_count = sum(1 for r in results if r.success)
-    run_ctx.stats["emails_sent"] = success_count
-    run_ctx.stats["leads_exported"] = len(leads_data) if success_count > 0 else 0
+    # Deliver to Basic tier
+    if basic_subs and leads_basic:
+        results, delivery_error = deliver_with_isolation(
+            subscribers=basic_subs,
+            leads=leads_basic,
+            config=config.smtp,
+            retry_config=config.retry,
+            portal_config=portal_config,
+            csv_label="basic",
+        )
+        if delivery_error:
+            logger.error(f"Basic delivery error: {delivery_error}")
+            run_ctx.increment("errors")
+        else:
+            success_count = sum(1 for r in results if r.success)
+            total_emails_sent += success_count
+            if success_count > 0:
+                total_leads_exported += len(leads_basic)
+                place_ids = [lead["place_id"] for lead in leads_basic]
+                db.mark_exported(place_ids, tier="basic")
+                logger.info(f"Marked {len(place_ids)} basic leads as exported")
+            for result in results:
+                if result.success:
+                    db.record_export(
+                        run_id=run_ctx.run_id,
+                        subscriber_email=result.subscriber_email,
+                        lead_count=len(leads_basic),
+                        csv_path=result.csv_path or "",
+                        tier="basic",
+                        export_type="cold",
+                    )
 
-    # Mark leads as exported if at least one delivery succeeded
-    if success_count > 0:
-        place_ids = [lead["place_id"] for lead in leads_data]
-        db.mark_exported(place_ids)
-        logger.info(f"Marked {len(place_ids)} leads as exported")
+    run_ctx.stats["emails_sent"] = total_emails_sent
+    run_ctx.stats["leads_exported"] = total_leads_exported
 
-    # Record exports in database
-    for result in results:
-        if result.success:
-            db.record_export(
-                run_id=run_ctx.run_id,
-                subscriber_email=result.subscriber_email,
-                lead_count=len(leads_data),
-                csv_path=str(config.database.db_path.parent / "output"),
-            )
-
-    return success_count > 0 or len(subscribers) == 0
+    return True
 
 
 def run_manual_review_phase(
@@ -406,17 +472,35 @@ def run_outreach_phase(
     leads = db.get_leads_ready_for_outreach(
         min_score=config.outreach.min_score_for_outreach
     )
-    if not leads:
+    if leads:
+        logger.info(f"Found {len(leads)} leads ready for outreach")
+    else:
         logger.info("No leads ready for outreach")
-        return 0
-
-    logger.info(f"Found {len(leads)} leads ready for outreach")
 
     if dry_run:
-        logger.info(f"[DRY-RUN] Would send outreach to {len(leads)} leads")
+        if leads:
+            logger.info(f"[DRY-RUN] Would send outreach to {len(leads)} leads")
+        followups = db.get_leads_for_followup(min_days_since_sent=3)
+        if followups:
+            logger.info(f"[DRY-RUN] Would send {len(followups)} follow-up emails")
         return 0
 
-    sent = run_outreach(leads, db, config.smtp, config.outreach, shutdown)
+    sent = 0
+    if leads:
+        sent = run_outreach(leads, db, config.smtp, config.outreach, shutdown)
+
+    remaining = max(config.outreach.max_emails_per_day - sent, 0)
+    if remaining > 0:
+        followups = run_followups(
+            db=db,
+            smtp_config=config.smtp,
+            outreach_config=config.outreach,
+            shutdown=shutdown,
+            max_to_send=remaining,
+        )
+        run_ctx.increment("followups_sent", followups)
+        sent += followups
+
     run_ctx.increment("outreach_sent", sent)
     return sent
 
@@ -455,13 +539,36 @@ def run_warm_delivery_phase(
         logger.warning("No subscribers for warm lead delivery")
         return True
 
-    results, error = deliver_warm_leads_with_isolation(subscribers, warm_leads, config)
+    pro_subs = [s for s in subscribers if s.tier == "pro"]
+    if not pro_subs:
+        logger.warning("No pro subscribers for warm lead delivery")
+        return True
+
+    portal_config = config.portal
+    if portal_config and not portal_config.base_url:
+        portal_config.base_url = config.outreach.tracking_base_url
+
+    results, error = deliver_warm_leads_with_isolation(
+        pro_subs, warm_leads, config, portal_config=portal_config
+    )
     if error:
         logger.error(f"Warm lead delivery error: {error}")
         return False
 
     success_count = sum(1 for r in results if r.get("success"))
-    logger.info(f"Delivered warm leads to {success_count}/{len(subscribers)} subscribers")
+    logger.info(f"Delivered warm leads to {success_count}/{len(pro_subs)} subscribers")
+
+    # Record exports for warm leads
+    for result in results:
+        if result.get("success"):
+            db.record_export(
+                run_id=run_ctx.run_id,
+                subscriber_email=result.get("subscriber_email"),
+                lead_count=len(warm_leads),
+                csv_path=result.get("csv_path", ""),
+                tier="pro",
+                export_type="warm",
+            )
     return success_count > 0
 
 

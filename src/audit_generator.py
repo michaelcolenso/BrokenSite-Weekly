@@ -105,6 +105,36 @@ ISSUE_DESCRIPTIONS = {
         "description": "Your website uses scrolling marquee text, which looks dated and is not accessible.",
         "impact": "Unprofessional appearance",
     },
+    "missing_meta_description": {
+        "title": "Missing Meta Description",
+        "severity": "medium",
+        "description": "Your site is missing a meta description, which reduces click-through rates from search results.",
+        "impact": "Lower search visibility and fewer clicks",
+    },
+    "missing_h1": {
+        "title": "Missing Main Heading",
+        "severity": "medium",
+        "description": "Your homepage lacks a clear H1 heading, which hurts SEO and confuses visitors.",
+        "impact": "Weaker SEO signals and unclear messaging",
+    },
+    "generic_title": {
+        "title": "Generic Page Title",
+        "severity": "medium",
+        "description": "Your page title is generic (e.g., 'Home'), which reduces SEO effectiveness.",
+        "impact": "Lower rankings and fewer qualified visitors",
+    },
+    "under_construction": {
+        "title": "Under Construction Page",
+        "severity": "critical",
+        "description": "Your website shows an under-construction page instead of business information.",
+        "impact": "Visitors can't learn about your business",
+    },
+}
+
+NON_ISSUE_REASONS = {
+    "has_gtm",
+    "has_fb_pixel",
+    "has_gclid",
 }
 
 
@@ -173,6 +203,8 @@ def _parse_reasons(reasons_str: str) -> List[Dict[str, str]]:
     issues = []
     for reason in (r.strip() for r in reasons_str.split(",")):
         if not reason:
+            continue
+        if reason in NON_ISSUE_REASONS:
             continue
         issue = ISSUE_DESCRIPTIONS.get(reason)
         if issue:

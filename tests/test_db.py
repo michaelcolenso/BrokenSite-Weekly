@@ -39,6 +39,28 @@ class TestDatabaseInitialization:
             ).fetchone()
             assert result is not None
 
+    def test_creates_suppression_and_inquiries_tables(self, test_database):
+        """Suppression and lead inquiries tables should exist."""
+        with test_database._connect() as conn:
+            suppression = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='suppression'"
+            ).fetchone()
+            inquiries = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='lead_inquiries'"
+            ).fetchone()
+            assert suppression is not None
+            assert inquiries is not None
+
+    def test_leads_has_exclusive_columns(self, test_database):
+        """Leads table should include exclusive and tier columns."""
+        with test_database._connect() as conn:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
+            assert "exclusive_until" in cols
+            assert "exclusive_tier" in cols
+            assert "lead_tier" in cols
+            assert "exported_basic_at" in cols
+            assert "exported_pro_at" in cols
+
 
 class TestLeadUpsert:
     """Tests for lead upsert operations."""
@@ -241,8 +263,38 @@ class TestDuplicateDetection:
             ))
 
         is_dup = test_database.is_duplicate("old_place_123")
-
         assert is_dup is False
+
+
+class TestExclusivityFiltering:
+    """Tests for exclusive lead window filtering."""
+
+    def test_exclusive_lead_hidden_from_basic(self, test_database):
+        lead = Lead(
+            place_id="exclusive_place",
+            cid="c1",
+            name="Exclusive Biz",
+            website="https://exclusive.com",
+            address="1 Exclusive Way",
+            phone="555-0000",
+            review_count=25,
+            city="Test City, TX",
+            category="plumber",
+            score=80,
+            reasons="parked_domain",
+            first_seen=datetime.utcnow(),
+            last_seen=datetime.utcnow(),
+            exclusive_until=datetime.utcnow() + timedelta(days=7),
+            exclusive_tier="pro",
+            lead_tier="hot",
+        )
+        test_database.upsert_lead(lead)
+
+        basic = test_database.get_unexported_leads_for_tier(40, tier="basic")
+        pro = test_database.get_unexported_leads_for_tier(40, tier="pro")
+
+        assert all(l["place_id"] != "exclusive_place" for l in basic)
+        assert any(l["place_id"] == "exclusive_place" for l in pro)
 
 
 class TestExportTracking:

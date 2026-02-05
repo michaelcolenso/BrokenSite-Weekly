@@ -86,6 +86,7 @@ class RunContext:
             "audits_generated": 0,
             "contacts_found": 0,
             "outreach_sent": 0,
+            "followups_sent": 0,
             "errors": 0,
         }
 

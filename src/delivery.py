@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
-from .config import SMTPConfig, RetryConfig, OUTPUT_DIR
+from .config import SMTPConfig, RetryConfig, OUTPUT_DIR, PortalConfig
 from .retry import retry_with_backoff
 from .gumroad import Subscriber
+from .portal_auth import generate_portal_token
+from .lead_utils import compute_lead_tier, has_marketing_pixel, suggested_pitch_from_reasons
 from .logging_setup import get_logger
 
 logger = get_logger("delivery")
@@ -30,6 +32,7 @@ class DeliveryResult:
     subscriber_email: str
     success: bool
     error: Optional[str] = None
+    csv_path: Optional[str] = None
 
 
 def _sanitize_csv_value(value: Any) -> Any:
@@ -40,6 +43,8 @@ def _sanitize_csv_value(value: Any) -> Any:
     >>> _sanitize_csv_value("@sum(A1:A2)")
     "'@sum(A1:A2)"
     """
+    if isinstance(value, datetime):
+        return value.isoformat()
     if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
         return f"'{value}"
     return value
@@ -60,13 +65,17 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
     fieldnames = [
         "name",
         "website",
-        "score",
-        "reasons",
         "address",
         "phone",
         "review_count",
         "city",
         "category",
+        "score",
+        "reasons",
+        "lead_tier",
+        "suggested_pitch",
+        "has_marketing_pixel",
+        "exclusive_until",
         "place_id",
     ]
 
@@ -77,10 +86,14 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
 
     for lead in leads:
         # Ensure all fields exist
+        reasons = lead.get("reasons", "")
         row = {
             field: _sanitize_csv_value(lead.get(field, ""))
             for field in fieldnames
         }
+        row["lead_tier"] = lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0))
+        row["suggested_pitch"] = suggested_pitch_from_reasons(reasons)
+        row["has_marketing_pixel"] = "yes" if has_marketing_pixel(reasons) else "no"
         writer.writerow(row)
 
     csv_content = buffer.getvalue()
@@ -111,12 +124,27 @@ def generate_manual_review_csv(
     return output_path
 
 
+def _build_portal_url(subscriber: Subscriber, portal_config: Optional[PortalConfig]) -> Optional[str]:
+    if not portal_config or not portal_config.secret:
+        return None
+    base_url = portal_config.base_url.rstrip("/")
+    if not base_url:
+        return None
+    token = generate_portal_token(
+        email=subscriber.email,
+        secret=portal_config.secret,
+        ttl_days=portal_config.token_ttl_days,
+    )
+    return f"{base_url}/portal?token={token}"
+
+
 def create_email(
     subscriber: Subscriber,
     csv_content: str,
     csv_filename: str,
     lead_count: int,
     config: SMTPConfig,
+    portal_url: Optional[str] = None,
 ) -> MIMEMultipart:
     """Create email message with CSV attachment."""
     msg = MIMEMultipart()
@@ -125,7 +153,9 @@ def create_email(
     msg["Subject"] = f"Your Weekly Broken Website Leads ({lead_count} leads)"
 
     # Email body
-    body = f"""Hi{' ' + subscriber.full_name.split()[0] if subscriber.full_name else ''},
+    greeting = f"Hi{' ' + subscriber.full_name.split()[0] if subscriber.full_name else ''},"
+    portal_block = f"\nPortal access:\n{portal_url}\n" if portal_url else ""
+    body = f"""{greeting}
 
 Your weekly batch of broken/outdated website leads is attached.
 
@@ -138,6 +168,7 @@ Quick tips:
 • Focus on scores 75+ first (hard failures: site down, SSL errors, parked domains)
 • Scores 40-74 are softer signals (outdated copyright, no mobile, HTTP-only)
 • The "reasons" column explains why each site scored high
+{portal_block}
 
 Happy prospecting!
 
@@ -198,6 +229,8 @@ def deliver_to_subscribers(
     leads: List[Dict[str, Any]],
     config: SMTPConfig,
     retry_config: RetryConfig = None,
+    portal_config: PortalConfig = None,
+    csv_label: str = None,
 ) -> List[DeliveryResult]:
     """
     Deliver CSV to all subscribers.
@@ -217,19 +250,22 @@ def deliver_to_subscribers(
 
     # Generate CSV once
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
-    csv_filename = f"broken_site_leads_{date_str}.csv"
-    csv_content, csv_path = generate_csv(leads)
+    label = f"_{csv_label}" if csv_label else ""
+    csv_filename = f"broken_site_leads_{date_str}{label}.csv"
+    csv_content, csv_path = generate_csv(leads, output_path=OUTPUT_DIR / csv_filename)
 
     logger.info(f"Delivering {len(leads)} leads to {len(subscribers)} subscribers")
 
     for subscriber in subscribers:
         try:
+            portal_url = _build_portal_url(subscriber, portal_config)
             msg = create_email(
                 subscriber=subscriber,
                 csv_content=csv_content,
                 csv_filename=csv_filename,
                 lead_count=len(leads),
                 config=config,
+                portal_url=portal_url,
             )
 
             send_email(msg, config, retry_config)
@@ -238,6 +274,7 @@ def deliver_to_subscribers(
             results.append(DeliveryResult(
                 subscriber_email=subscriber.email,
                 success=True,
+                csv_path=str(csv_path),
             ))
 
         except Exception as e:
@@ -246,6 +283,7 @@ def deliver_to_subscribers(
                 subscriber_email=subscriber.email,
                 success=False,
                 error=str(e),
+                csv_path=str(csv_path),
             ))
 
     success_count = sum(1 for r in results if r.success)
@@ -259,6 +297,8 @@ def deliver_with_isolation(
     leads: List[Dict[str, Any]],
     config: SMTPConfig,
     retry_config: RetryConfig = None,
+    portal_config: PortalConfig = None,
+    csv_label: str = None,
 ) -> tuple[List[DeliveryResult], Optional[str]]:
     """
     Deliver to subscribers with full error isolation.
@@ -266,7 +306,14 @@ def deliver_with_isolation(
     Never raises exceptions to caller.
     """
     try:
-        results = deliver_to_subscribers(subscribers, leads, config, retry_config)
+        results = deliver_to_subscribers(
+            subscribers=subscribers,
+            leads=leads,
+            config=config,
+            retry_config=retry_config,
+            portal_config=portal_config,
+            csv_label=csv_label,
+        )
         return results, None
     except Exception as e:
         logger.error(f"Delivery system error: {e}")

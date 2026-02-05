@@ -131,6 +131,38 @@ JS_REQUIRED_INDICATORS = [
     "you need to enable javascript",
 ]
 
+# Basic SEO and construction indicators
+GENERIC_TITLE_PATTERNS = [
+    r"^home$",
+    r"^homepage$",
+    r"^welcome$",
+    r"^index$",
+    r"^untitled$",
+    r"^website$",
+]
+
+UNDER_CONSTRUCTION_PATTERNS = [
+    "under construction",
+    "coming soon",
+    "site is being built",
+    "website coming soon",
+    "launching soon",
+]
+
+MARKETING_SIGNALS = {
+    "has_gtm": [
+        "googletagmanager.com/gtm.js",
+        "gtm-",
+    ],
+    "has_fb_pixel": [
+        "connect.facebook.net/en_us/fbevents.js",
+        "fbq(",
+    ],
+    "has_gclid": [
+        "gclid=",
+    ],
+}
+
 # Footer/copyright patterns for year extraction
 # We specifically look for copyright context to avoid false positives from
 # phone numbers, addresses, prices, etc.
@@ -208,6 +240,48 @@ def _parse_last_modified_years(headers: Dict[str, Any]) -> Optional[float]:
         except ValueError:
             continue
     return None
+
+
+def _extract_title(html: str) -> Optional[str]:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    title = re.sub(r"\s+", " ", match.group(1)).strip()
+    return title or None
+
+
+def _is_generic_title(title: Optional[str]) -> bool:
+    if not title:
+        return False
+    normalized = re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
+    for pattern in GENERIC_TITLE_PATTERNS:
+        if re.match(pattern, normalized):
+            return True
+    return False
+
+
+def _has_meta_description(html: str) -> bool:
+    return bool(re.search(r'<meta\s+name=["\']description["\']', html, re.IGNORECASE))
+
+
+def _has_h1(html: str) -> bool:
+    return "<h1" in html.lower()
+
+
+def _detect_under_construction(html: str) -> bool:
+    html_lower = html.lower()
+    return any(pattern in html_lower for pattern in UNDER_CONSTRUCTION_PATTERNS)
+
+
+def _detect_marketing_signals(html: str) -> List[str]:
+    html_lower = html.lower()
+    found = []
+    for key, patterns in MARKETING_SIGNALS.items():
+        for pattern in patterns:
+            if pattern in html_lower:
+                found.append(key)
+                break
+    return found
 
 
 def _check_parked_domain(html: str) -> bool:
@@ -703,6 +777,11 @@ def evaluate_website(
             error=error,
         )
 
+    # Under construction / coming soon
+    if _detect_under_construction(html):
+        score += config.weight_under_construction
+        reasons.append("under_construction")
+
     # Parked domain check
     if _check_parked_domain(html):
         score += config.weight_parked_domain
@@ -714,6 +793,22 @@ def evaluate_website(
         reasons.append("no_https")
 
     # === Medium signals ===
+
+    # Missing meta description
+    if not _has_meta_description(html):
+        score += config.weight_missing_meta_description
+        reasons.append("missing_meta_description")
+
+    # Missing H1
+    if not _has_h1(html):
+        score += config.weight_missing_h1
+        reasons.append("missing_h1")
+
+    # Generic title tag
+    title = _extract_title(html)
+    if title and _is_generic_title(title):
+        score += config.weight_generic_title
+        reasons.append("generic_title")
 
     # Outdated copyright year
     copyright_year = _extract_copyright_year(html)
@@ -754,6 +849,13 @@ def evaluate_website(
 
         score += weight
         reasons.append(f"diy_{diy_builder}")
+
+    # Marketing spend indicators (non-scoring)
+    for signal in _detect_marketing_signals(html):
+        if signal not in reasons:
+            reasons.append(signal)
+    if final_url and "gclid=" in final_url.lower() and "has_gclid" not in reasons:
+        reasons.append("has_gclid")
 
     score, reasons = _apply_unverified_cap(score, reasons, config)
     return ScoringResult(

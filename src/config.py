@@ -57,6 +57,10 @@ class ScoringConfig:
     weight_flash_detected: int = 40
     weight_missing_viewport: int = 20
     weight_missing_responsive: int = 15
+    weight_missing_meta_description: int = 10
+    weight_missing_h1: int = 8
+    weight_generic_title: int = 10
+    weight_under_construction: int = 70
 
     # Weak signals (DIY builders - low weight to avoid false positives)
     weight_wix: int = 5
@@ -106,7 +110,11 @@ class ScoringConfig:
 class GumroadConfig:
     """Gumroad API configuration."""
     access_token: str = field(default_factory=lambda: os.environ.get("GUMROAD_ACCESS_TOKEN", ""))
+    # Legacy single-product support
     product_id: str = field(default_factory=lambda: os.environ.get("GUMROAD_PRODUCT_ID", ""))
+    # Multi-product support (JSON mapping)
+    products_json: str = field(default_factory=lambda: os.environ.get("GUMROAD_PRODUCTS_JSON", ""))
+    pro_seat_cap: int = field(default_factory=lambda: int(os.environ.get("GUMROAD_PRO_SEAT_CAP", "5")))
     api_base_url: str = "https://api.gumroad.com/v2"
 
 
@@ -120,6 +128,14 @@ class SMTPConfig:
     from_email: str = field(default_factory=lambda: os.environ.get("SMTP_FROM_EMAIL", ""))
     from_name: str = field(default_factory=lambda: os.environ.get("SMTP_FROM_NAME", "BrokenSite Weekly"))
     use_tls: bool = True
+
+
+@dataclass
+class PortalConfig:
+    """Subscriber portal configuration."""
+    secret: str = field(default_factory=lambda: os.environ.get("PORTAL_SECRET", ""))
+    base_url: str = field(default_factory=lambda: os.environ.get("PORTAL_BASE_URL", os.environ.get("TRACKING_BASE_URL", "")))
+    token_ttl_days: int = field(default_factory=lambda: int(os.environ.get("PORTAL_TOKEN_TTL_DAYS", "30")))
 
 
 @dataclass
@@ -145,9 +161,13 @@ class OutreachConfig:
     enabled: bool = field(default_factory=lambda: os.environ.get("OUTREACH_ENABLED", "true").lower() == "true")
 
     # Sending limits
-    max_emails_per_day: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_DAY", "100")))
-    max_emails_per_hour: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_HOUR", "20")))
-    delay_between_emails_seconds: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_DELAY_SECONDS", "30")))
+    max_emails_per_day: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_DAY", "300")))
+    max_emails_per_hour: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_HOUR", "60")))
+    delay_between_emails_min_seconds: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_DELAY_MIN_SECONDS", "15")))
+    delay_between_emails_max_seconds: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_DELAY_MAX_SECONDS", "45")))
+    # Business-hour window (local server time)
+    send_start_hour: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_SEND_START_HOUR", "8")))
+    send_end_hour: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_SEND_END_HOUR", "18")))
 
     # Thresholds
     min_score_for_outreach: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MIN_SCORE", "50")))
@@ -159,6 +179,17 @@ class OutreachConfig:
 
     # Tracking
     tracking_base_url: str = field(default_factory=lambda: os.environ.get("TRACKING_BASE_URL", ""))
+
+    def __post_init__(self):
+        # Backward compatibility for single delay value
+        legacy_delay = os.environ.get("OUTREACH_DELAY_SECONDS")
+        if legacy_delay:
+            try:
+                value = int(legacy_delay)
+                self.delay_between_emails_min_seconds = value
+                self.delay_between_emails_max_seconds = value
+            except ValueError:
+                pass
 
 
 @dataclass
@@ -179,6 +210,7 @@ class Config:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     outreach: OutreachConfig = field(default_factory=OutreachConfig)
     delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
+    portal: PortalConfig = field(default_factory=PortalConfig)
 
     # Search queries - niches to target
     search_queries: List[str] = field(default_factory=lambda: [
@@ -224,8 +256,8 @@ def validate_config(config: Config) -> List[str]:
 
     if not config.gumroad.access_token:
         errors.append("GUMROAD_ACCESS_TOKEN environment variable not set")
-    if not config.gumroad.product_id:
-        errors.append("GUMROAD_PRODUCT_ID environment variable not set")
+    if not config.gumroad.product_id and not config.gumroad.products_json:
+        errors.append("GUMROAD_PRODUCT_ID or GUMROAD_PRODUCTS_JSON not set")
     if not config.smtp.username:
         errors.append("SMTP_USERNAME environment variable not set")
     if not config.smtp.password:
@@ -239,5 +271,7 @@ def validate_config(config: Config) -> List[str]:
             errors.append("TRACKING_BASE_URL environment variable not set (required for outreach)")
         if not config.outreach.physical_address:
             errors.append("OUTREACH_PHYSICAL_ADDRESS environment variable not set (required for CAN-SPAM compliance)")
+    if not config.portal.secret:
+        errors.append("PORTAL_SECRET environment variable not set (required for portal links)")
 
     return errors

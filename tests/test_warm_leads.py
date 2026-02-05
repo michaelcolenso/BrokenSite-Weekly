@@ -415,9 +415,10 @@ class TestWarmLeadConfig:
 
     def test_outreach_config_defaults(self):
         config = OutreachConfig()
-        assert config.max_emails_per_day == 100
-        assert config.max_emails_per_hour == 20
-        assert config.delay_between_emails_seconds == 30
+        assert config.max_emails_per_day == 300
+        assert config.max_emails_per_hour == 60
+        assert config.delay_between_emails_min_seconds == 15
+        assert config.delay_between_emails_max_seconds == 45
         assert config.min_score_for_outreach == 50
         assert config.min_contact_confidence == 0.7
 

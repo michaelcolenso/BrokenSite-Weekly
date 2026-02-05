@@ -82,6 +82,38 @@ class ScoringQuickWinTests(unittest.TestCase):
         self.assertTrue(any(reason.startswith("last_modified_") for reason in result.reasons))
         self.assertGreaterEqual(result.score, config.weight_last_modified_stale)
 
+    def test_scores_missing_meta_description(self) -> None:
+        config = ScoringConfig(weight_missing_meta_description=10)
+        html = BASE_HTML.replace('<meta name="viewport"', '<meta name="viewport"')  # no description
+        response = _Response(text=html)
+        result = evaluate_website("https://example.com", config=config, response=response)
+        self.assertIn("missing_meta_description", result.reasons)
+        self.assertGreaterEqual(result.score, config.weight_missing_meta_description)
+
+    def test_scores_missing_h1(self) -> None:
+        config = ScoringConfig(weight_missing_h1=8)
+        html = BASE_HTML.replace("<h1>Example</h1>", "<div>No H1</div>")
+        response = _Response(text=html)
+        result = evaluate_website("https://example.com", config=config, response=response)
+        self.assertIn("missing_h1", result.reasons)
+        self.assertGreaterEqual(result.score, config.weight_missing_h1)
+
+    def test_scores_generic_title(self) -> None:
+        config = ScoringConfig(weight_generic_title=10)
+        html = BASE_HTML.replace("<title>Example</title>", "<title>Home</title>")
+        response = _Response(text=html)
+        result = evaluate_website("https://example.com", config=config, response=response)
+        self.assertIn("generic_title", result.reasons)
+        self.assertGreaterEqual(result.score, config.weight_generic_title)
+
+    def test_scores_under_construction(self) -> None:
+        config = ScoringConfig(weight_under_construction=70)
+        html = BASE_HTML.replace("<h1>Example</h1>", "<h1>Under Construction</h1>")
+        response = _Response(text=html)
+        result = evaluate_website("https://example.com", config=config, response=response)
+        self.assertIn("under_construction", result.reasons)
+        self.assertGreaterEqual(result.score, config.weight_under_construction)
+
 
 if __name__ == "__main__":
     unittest.main()

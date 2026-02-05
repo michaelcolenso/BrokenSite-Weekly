@@ -9,8 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .config import Config, OUTPUT_DIR, SMTPConfig
+from .config import Config, OUTPUT_DIR, SMTPConfig, PortalConfig
 from .delivery import create_email, send_email, _sanitize_csv_value
+from .portal_auth import generate_portal_token
+from .lead_utils import compute_lead_tier, has_marketing_pixel, suggested_pitch_from_reasons
 from .logging_setup import get_logger
 
 logger = get_logger("warm_delivery")
@@ -30,11 +32,16 @@ WARM_CSV_COLUMNS = [
     "address",
     "city",
     "category",
+    "review_count",
     "website_score",
     "engagement_score",
     "email",
     "audit_url",
     "reasons",
+    "lead_tier",
+    "suggested_pitch",
+    "has_marketing_pixel",
+    "exclusive_until",
 ]
 
 
@@ -56,6 +63,7 @@ def generate_warm_lead_csv(
     writer.writerow(WARM_CSV_COLUMNS)
 
     for lead in warm_leads:
+        reasons = lead.get("reasons", "")
         writer.writerow([
             _sanitize_csv_value(lead.get("name", "")),
             _sanitize_csv_value(lead.get("website", "")),
@@ -63,11 +71,16 @@ def generate_warm_lead_csv(
             _sanitize_csv_value(lead.get("address", "")),
             _sanitize_csv_value(lead.get("city", "")),
             _sanitize_csv_value(lead.get("category", "")),
+            _sanitize_csv_value(lead.get("review_count", "")),
             lead.get("score", 0),
             lead.get("engagement_score", 0),
             _sanitize_csv_value(lead.get("email", "")),
             _sanitize_csv_value(lead.get("audit_url", "")),
-            _sanitize_csv_value(lead.get("reasons", "")),
+            _sanitize_csv_value(reasons),
+            lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0)),
+            suggested_pitch_from_reasons(reasons),
+            "yes" if has_marketing_pixel(reasons) else "no",
+            _sanitize_csv_value(lead.get("exclusive_until", "")),
         ])
 
     csv_content = output.getvalue()
@@ -83,6 +96,7 @@ def deliver_warm_leads(
     subscribers: List,
     warm_leads: List[Dict],
     config: Config,
+    portal_config: PortalConfig = None,
 ) -> List[Dict]:
     """
     Deliver warm leads to subscribers.
@@ -110,6 +124,7 @@ def deliver_warm_leads(
                 csv_filename=csv_filename,
                 lead_count=len(warm_leads),
                 config=config.smtp,
+                portal_config=portal_config,
             )
 
             send_email(msg, config.smtp, config.retry)
@@ -118,6 +133,7 @@ def deliver_warm_leads(
                 "subscriber_email": subscriber.email,
                 "success": True,
                 "lead_count": len(warm_leads),
+                "csv_path": str(csv_path),
             })
 
         except Exception as e:
@@ -126,15 +142,26 @@ def deliver_warm_leads(
                 "subscriber_email": subscriber.email,
                 "success": False,
                 "error": str(e),
+                "csv_path": str(csv_path),
             })
 
     return results
 
 
 def _create_warm_lead_email(
-    subscriber, csv_content: str, csv_filename: str, lead_count: int, config: SMTPConfig
+    subscriber, csv_content: str, csv_filename: str, lead_count: int, config: SMTPConfig, portal_config: PortalConfig = None
 ):
     """Create warm lead delivery email using existing create_email pattern."""
+    portal_url = None
+    if portal_config and portal_config.secret and portal_config.base_url:
+        token = generate_portal_token(
+            email=subscriber.email,
+            secret=portal_config.secret,
+            ttl_days=portal_config.token_ttl_days,
+        )
+        base_url = portal_config.base_url.rstrip("/")
+        portal_url = f"{base_url}/portal?token={token}"
+
     # Reuse the existing create_email function from delivery.py
     # but with a modified subject line indicating these are warm leads
     msg = create_email(
@@ -143,6 +170,7 @@ def _create_warm_lead_email(
         csv_filename=csv_filename,
         lead_count=lead_count,
         config=config,
+        portal_url=portal_url,
     )
     # Override subject to indicate warm leads
     del msg["Subject"]
@@ -154,10 +182,11 @@ def deliver_warm_leads_with_isolation(
     subscribers: List,
     warm_leads: List[Dict],
     config: Config,
+    portal_config: PortalConfig = None,
 ) -> Tuple[List[Dict], Optional[str]]:
     """Never raises - returns (results, error_message)."""
     try:
-        results = deliver_warm_leads(subscribers, warm_leads, config)
+        results = deliver_warm_leads(subscribers, warm_leads, config, portal_config=portal_config)
         return results, None
     except Exception as e:
         logger.error(f"Warm lead delivery failed: {e}")

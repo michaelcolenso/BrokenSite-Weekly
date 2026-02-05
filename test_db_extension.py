@@ -34,11 +34,14 @@ def test_database_extension():
             # Check all new tables exist
             tables = conn.execute("""
                 SELECT name FROM sqlite_master
-                WHERE type='table' AND name IN ('audits', 'contacts', 'outreach', 'engagement_events', 'unsubscribes')
+                WHERE type='table' AND name IN (
+                    'audits', 'contacts', 'outreach', 'engagement_events',
+                    'unsubscribes', 'suppression', 'lead_inquiries'
+                )
             """).fetchall()
 
             table_names = [t['name'] for t in tables]
-            expected_tables = ['audits', 'contacts', 'outreach', 'engagement_events', 'unsubscribes']
+            expected_tables = ['audits', 'contacts', 'outreach', 'engagement_events', 'unsubscribes', 'suppression', 'lead_inquiries']
 
             for table in expected_tables:
                 if table in table_names:
