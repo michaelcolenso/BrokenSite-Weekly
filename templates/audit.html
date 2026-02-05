@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta property="og:title" content="Website Health Report for {{ business_name }}" />
+    <meta
+      property="og:description"
+      content="Professional website analysis identifying {{ issues|length }} issue{{ 's' if issues|length != 1 }} affecting your online presence."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="BrokenSite Weekly" />
+    <title>Website Health Report - {{ business_name }}</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        line-height: 1.6;
+        color: #2d3748;
+        background: #f7fafc;
+        padding: 20px;
+      }
+      .container {
+        max-width: 800px;
+        margin: 0 auto;
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
+        overflow: hidden;
+      }
+      .header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 40px 30px;
+        text-align: center;
+      }
+      .header h1 {
+        font-size: 28px;
+        font-weight: 700;
+        margin-bottom: 10px;
+      }
+      .header .subtitle {
+        font-size: 16px;
+        opacity: 0.95;
+        margin-bottom: 20px;
+      }
+      .business-info {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 8px;
+        padding: 20px;
+        margin-top: 20px;
+        text-align: left;
+      }
+      .business-info .label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        opacity: 0.8;
+        margin-bottom: 5px;
+      }
+      .business-info .value {
+        font-size: 18px;
+        font-weight: 600;
+        margin-bottom: 15px;
+        word-break: break-all;
+      }
+      .business-info .value:last-child {
+        margin-bottom: 0;
+      }
+      .score-badge {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        background: rgba(255, 255, 255, 0.25);
+        border: 2px solid white;
+        border-radius: 50%;
+        width: 100px;
+        height: 100px;
+        margin: 20px auto;
+        font-weight: 700;
+      }
+      .score-badge .score-number {
+        font-size: 36px;
+        line-height: 1;
+      }
+      .score-badge .score-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        opacity: 0.9;
+        margin-top: 5px;
+      }
+      .content {
+        padding: 40px 30px;
+      }
+      .section-title {
+        font-size: 24px;
+        font-weight: 700;
+        color: #1a202c;
+        margin-bottom: 20px;
+        border-bottom: 3px solid #667eea;
+        padding-bottom: 10px;
+      }
+      .intro-text {
+        font-size: 16px;
+        color: #4a5568;
+        margin-bottom: 30px;
+        line-height: 1.8;
+      }
+      .issues-list {
+        list-style: none;
+      }
+      .issue-item {
+        background: #f7fafc;
+        border-left: 4px solid #cbd5e0;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+      }
+      .issue-item.critical {
+        border-left-color: #f56565;
+        background: #fff5f5;
+      }
+      .issue-item.high {
+        border-left-color: #ed8936;
+        background: #fffaf0;
+      }
+      .issue-item.medium {
+        border-left-color: #ecc94b;
+        background: #fffff0;
+      }
+      .issue-header {
+        display: flex;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      .severity-icon {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 18px;
+        margin-right: 12px;
+        flex-shrink: 0;
+      }
+      .severity-icon.critical {
+        background: #f56565;
+        color: white;
+      }
+      .severity-icon.high {
+        background: #ed8936;
+        color: white;
+      }
+      .severity-icon.medium {
+        background: #ecc94b;
+        color: #744210;
+      }
+      .issue-title {
+        font-size: 18px;
+        font-weight: 700;
+        color: #1a202c;
+      }
+      .issue-description {
+        font-size: 15px;
+        color: #4a5568;
+        line-height: 1.7;
+        margin-bottom: 12px;
+      }
+      .issue-impact {
+        font-size: 14px;
+        color: #718096;
+        font-style: italic;
+      }
+      .issue-impact::before {
+        content: "\2192 ";
+        font-weight: 700;
+        font-style: normal;
+      }
+      .cta-section {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 40px 30px;
+        text-align: center;
+      }
+      .cta-section h2 {
+        font-size: 26px;
+        font-weight: 700;
+        margin-bottom: 15px;
+      }
+      .cta-section p {
+        font-size: 16px;
+        opacity: 0.95;
+        margin-bottom: 25px;
+        line-height: 1.7;
+      }
+      .cta-button {
+        display: inline-block;
+        background: white;
+        color: #667eea;
+        padding: 16px 40px;
+        border-radius: 8px;
+        font-size: 18px;
+        font-weight: 700;
+        text-decoration: none;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      }
+      .footer {
+        background: #f7fafc;
+        padding: 30px;
+        text-align: center;
+        font-size: 13px;
+        color: #718096;
+        border-top: 1px solid #e2e8f0;
+      }
+      .footer a {
+        color: #667eea;
+        text-decoration: none;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #1a202c;
+        }
+        .container {
+          background: #2d3748;
+        }
+        .content {
+          color: #e2e8f0;
+        }
+        .section-title {
+          color: #f7fafc;
+        }
+        .intro-text {
+          color: #cbd5e0;
+        }
+        .issue-item {
+          background: #1a202c;
+        }
+        .issue-item.critical {
+          background: #2d1f1f;
+        }
+        .issue-item.high {
+          background: #2d2419;
+        }
+        .issue-item.medium {
+          background: #2d2a1a;
+        }
+        .issue-title {
+          color: #f7fafc;
+        }
+        .issue-description {
+          color: #cbd5e0;
+        }
+        .issue-impact {
+          color: #a0aec0;
+        }
+        .footer {
+          background: #1a202c;
+          border-top-color: #4a5568;
+        }
+      }
+      @media (max-width: 640px) {
+        body {
+          padding: 10px;
+        }
+        .header {
+          padding: 30px 20px;
+        }
+        .header h1 {
+          font-size: 24px;
+        }
+        .content {
+          padding: 30px 20px;
+        }
+        .cta-section {
+          padding: 30px 20px;
+        }
+        .cta-button {
+          padding: 14px 30px;
+          font-size: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <img
+      src="{{ tracking_base_url }}/track/{{ place_id }}/open.gif"
+      width="1"
+      height="1"
+      style="display: none"
+      alt=""
+    />
+    <div class="container">
+      <div class="header">
+        <h1>Website Health Report</h1>
+        <p class="subtitle">Professional analysis of your online presence</p>
+        <div class="score-badge">
+          <div class="score-number">{{ score }}</div>
+          <div class="score-label">Issue Score</div>
+        </div>
+        <div class="business-info">
+          <div>
+            <div class="label">Business Name</div>
+            <div class="value">{{ business_name }}</div>
+          </div>
+          {% if website %}
+          <div>
+            <div class="label">Website</div>
+            <div class="value">{{ website }}</div>
+          </div>
+          {% endif %}
+          <div>
+            <div class="label">Location</div>
+            <div class="value">{{ city }} &middot; {{ category }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="content">
+        <h2 class="section-title">What We Found</h2>
+        <p class="intro-text">
+          We identified <strong>{{ issues|length }} issue{{ 's' if issues|length != 1 }}</strong>
+          affecting your website's performance and ability to attract customers.
+        </p>
+        <ul class="issues-list">
+          {% for issue in issues %}
+          <li class="issue-item {{ issue.severity }}">
+            <div class="issue-header">
+              <div class="severity-icon {{ issue.severity }}">
+                {% if issue.severity == 'critical' %}!{% elif issue.severity == 'high' %}&#9888;{% else %}&bull;{% endif
+                %}
+              </div>
+              <div class="issue-title">{{ issue.title }}</div>
+            </div>
+            <div class="issue-description">{{ issue.description }}</div>
+            <div class="issue-impact">{{ issue.impact }}</div>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      <div class="cta-section">
+        <h2>Ready to Fix These Issues?</h2>
+        <p>
+          These problems are costing you customers every day. Let's discuss how to get your online presence working for
+          your business.
+        </p>
+        <a href="{{ tracking_base_url }}/track/{{ place_id }}/cta" class="cta-button">Get Help Now</a>
+      </div>
+      <div class="footer">
+        <p>Report generated on {{ generated_date }} | Powered by BrokenSite Weekly</p>
+        <p style="margin-top: 15px"><a href="{{ tracking_base_url }}/unsubscribe/{{ place_id }}">Unsubscribe</a></p>
+      </div>
+    </div>
+  </body>
+</html>

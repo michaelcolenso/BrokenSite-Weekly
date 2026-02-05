@@ -82,6 +82,58 @@ CREATE TABLE IF NOT EXISTS exports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_exports_subscriber ON exports(subscriber_email);
+
+-- Audit pages generated for leads
+CREATE TABLE IF NOT EXISTS audits (
+    place_id TEXT PRIMARY KEY,
+    audit_url TEXT,
+    audit_html_path TEXT,
+    generated_at TIMESTAMP,
+    issues_json TEXT
+);
+
+-- Contact information found for leads
+CREATE TABLE IF NOT EXISTS contacts (
+    place_id TEXT PRIMARY KEY,
+    email TEXT,
+    source TEXT,
+    confidence REAL,
+    found_at TIMESTAMP
+);
+
+-- Outreach attempts to leads
+CREATE TABLE IF NOT EXISTS outreach (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_id TEXT,
+    email TEXT,
+    audit_url TEXT,
+    sent_at TIMESTAMP,
+    success BOOLEAN,
+    error TEXT,
+    UNIQUE(place_id, email)
+);
+
+CREATE INDEX IF NOT EXISTS idx_outreach_place_id ON outreach(place_id);
+
+-- Engagement tracking events
+CREATE TABLE IF NOT EXISTS engagement_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_id TEXT,
+    event_type TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    timestamp TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_engagement_place_id ON engagement_events(place_id);
+CREATE INDEX IF NOT EXISTS idx_engagement_type ON engagement_events(event_type);
+
+-- Unsubscribe list
+CREATE TABLE IF NOT EXISTS unsubscribes (
+    place_id TEXT PRIMARY KEY,
+    email TEXT,
+    unsubscribed_at TIMESTAMP
+);
 """
 
 
@@ -281,3 +333,222 @@ class Database:
                 (cutoff,)
             )
             logger.info(f"Cleaned up {result.rowcount} old unexported leads")
+
+    # ---- Audit Methods ----
+
+    def record_audit(self, place_id: str, audit_url: str, audit_html_path: str, issues_json: str):
+        """Record a generated audit for a lead."""
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO audits (place_id, audit_url, audit_html_path, generated_at, issues_json)
+                VALUES (?, ?, ?, ?, ?)
+            """, (place_id, audit_url, audit_html_path, datetime.utcnow(), issues_json))
+
+    def get_leads_without_audits(self, min_score: int) -> List[Dict[str, Any]]:
+        """Get leads with score >= min_score that don't have an audit yet."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT l.place_id, l.name, l.website, l.score, l.reasons
+                FROM leads l
+                LEFT JOIN audits a ON l.place_id = a.place_id
+                WHERE l.score >= ? AND l.website IS NOT NULL AND a.place_id IS NULL
+                ORDER BY l.score DESC
+            """, (min_score,)).fetchall()
+
+            return [dict(row) for row in rows]
+
+    def get_audit_url(self, place_id: str) -> Optional[str]:
+        """Get the audit URL for a lead."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT audit_url FROM audits WHERE place_id = ?",
+                (place_id,)
+            ).fetchone()
+            return row["audit_url"] if row else None
+
+    # ---- Contact Methods ----
+
+    def record_contact(self, place_id: str, email: str, source: str, confidence: float):
+        """Record contact information for a lead."""
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO contacts (place_id, email, source, confidence, found_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (place_id, email, source, confidence, datetime.utcnow()))
+
+    def get_contact(self, place_id: str) -> Optional[Dict[str, Any]]:
+        """Get contact information for a lead."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT place_id, email, source, confidence, found_at FROM contacts WHERE place_id = ?",
+                (place_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_leads_without_contacts(self) -> List[Dict[str, Any]]:
+        """Get leads that have a website but no contact record."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT l.place_id, l.name, l.website, l.score
+                FROM leads l
+                LEFT JOIN contacts c ON l.place_id = c.place_id
+                WHERE l.website IS NOT NULL AND c.place_id IS NULL
+                ORDER BY l.score DESC
+            """).fetchall()
+
+            return [dict(row) for row in rows]
+
+    # ---- Outreach Methods ----
+
+    def record_outreach(self, place_id: str, email: str, audit_url: str, success: bool, error: str = None):
+        """Record an outreach attempt."""
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO outreach (place_id, email, audit_url, sent_at, success, error)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (place_id, email, audit_url, datetime.utcnow(), success, error))
+
+    def get_leads_ready_for_outreach(self, min_score: int) -> List[Dict[str, Any]]:
+        """
+        Get leads that have audit + contact but haven't been contacted and aren't unsubscribed.
+        Only returns leads with confidence >= 0.7.
+        """
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT l.place_id, l.name, l.website, l.score,
+                       c.email, c.confidence,
+                       a.audit_url
+                FROM leads l
+                INNER JOIN audits a ON l.place_id = a.place_id
+                INNER JOIN contacts c ON l.place_id = c.place_id
+                LEFT JOIN outreach o ON l.place_id = o.place_id
+                LEFT JOIN unsubscribes u ON l.place_id = u.place_id
+                WHERE l.score >= ?
+                  AND c.confidence >= 0.7
+                  AND o.place_id IS NULL
+                  AND u.place_id IS NULL
+                ORDER BY l.score DESC, c.confidence DESC
+            """, (min_score,)).fetchall()
+
+            return [dict(row) for row in rows]
+
+    def has_been_contacted(self, place_id: str) -> bool:
+        """Check if a lead has been contacted."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM outreach WHERE place_id = ?",
+                (place_id,)
+            ).fetchone()
+            return row is not None
+
+    # ---- Engagement Methods ----
+
+    def record_event(self, place_id: str, event_type: str, ip_address: str = None, user_agent: str = None):
+        """Record an engagement event."""
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT INTO engagement_events (place_id, event_type, ip_address, user_agent, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            """, (place_id, event_type, ip_address, user_agent, datetime.utcnow()))
+
+    def get_events_for_lead(self, place_id: str) -> List[Dict[str, Any]]:
+        """Get all engagement events for a lead."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT event_type, ip_address, user_agent, timestamp
+                FROM engagement_events
+                WHERE place_id = ?
+                ORDER BY timestamp DESC
+            """, (place_id,)).fetchall()
+
+            return [dict(row) for row in rows]
+
+    def get_engagement_score(self, place_id: str) -> int:
+        """
+        Calculate engagement score for a lead.
+        Weights: email_opened=5, page_view=25, cta_click=50, unsubscribe=-100
+        """
+        with self._connect() as conn:
+            # Check if unsubscribed first
+            unsubscribed = conn.execute(
+                "SELECT 1 FROM unsubscribes WHERE place_id = ?",
+                (place_id,)
+            ).fetchone()
+            if unsubscribed:
+                return -100
+
+            # Count event types
+            rows = conn.execute("""
+                SELECT event_type, COUNT(*) as count
+                FROM engagement_events
+                WHERE place_id = ?
+                GROUP BY event_type
+            """, (place_id,)).fetchall()
+
+            score = 0
+            for row in rows:
+                event_type = row["event_type"]
+                count = row["count"]
+                if event_type == "email_opened":
+                    score += 5 * count
+                elif event_type == "page_view":
+                    score += 25 * count
+                elif event_type == "cta_click":
+                    score += 50 * count
+
+            return score
+
+    # ---- Unsubscribe Methods ----
+
+    def add_unsubscribe(self, place_id: str, email: str):
+        """Add a lead to the unsubscribe list."""
+        with self._connect() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO unsubscribes (place_id, email, unsubscribed_at)
+                VALUES (?, ?, ?)
+            """, (place_id, email, datetime.utcnow()))
+
+    def is_unsubscribed(self, place_id: str) -> bool:
+        """Check if a lead is unsubscribed."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM unsubscribes WHERE place_id = ?",
+                (place_id,)
+            ).fetchone()
+            return row is not None
+
+    # ---- Warm Lead Query ----
+
+    def get_warm_leads(self, min_engagement_score: int = 25) -> List[Dict[str, Any]]:
+        """
+        Get leads with engagement score >= threshold, excluding unsubscribed.
+        Returns leads with their engagement scores.
+        """
+        with self._connect() as conn:
+            # Get all leads that have been contacted and have events
+            rows = conn.execute("""
+                SELECT DISTINCT l.place_id, l.name, l.website, l.address, l.phone,
+                       l.city, l.category, l.score, l.reasons,
+                       c.email, a.audit_url
+                FROM leads l
+                INNER JOIN outreach o ON l.place_id = o.place_id
+                INNER JOIN contacts c ON l.place_id = c.place_id
+                INNER JOIN audits a ON l.place_id = a.place_id
+                LEFT JOIN unsubscribes u ON l.place_id = u.place_id
+                WHERE o.success = 1
+                  AND u.place_id IS NULL
+            """).fetchall()
+
+            # Calculate engagement scores and filter
+            warm_leads = []
+            for row in rows:
+                place_id = row["place_id"]
+                engagement_score = self.get_engagement_score(place_id)
+                if engagement_score >= min_engagement_score:
+                    lead_dict = dict(row)
+                    lead_dict["engagement_score"] = engagement_score
+                    warm_leads.append(lead_dict)
+
+            # Sort by engagement score descending
+            warm_leads.sort(key=lambda x: x["engagement_score"], reverse=True)
+            return warm_leads

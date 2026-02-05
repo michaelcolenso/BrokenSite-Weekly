@@ -19,6 +19,10 @@ from .maps_scraper import scrape_with_isolation, Business
 from .scoring import evaluate_with_isolation, ScoringResult
 from .gumroad import get_subscribers_with_isolation
 from .delivery import deliver_with_isolation, generate_csv, generate_manual_review_csv
+from .audit_generator import generate_audit_page, get_issues_json
+from .contact_finder import find_contact_with_isolation
+from .outreach import run_outreach
+from .warm_delivery import deliver_warm_leads_with_isolation
 
 logger = get_logger("orchestrator")
 
@@ -308,10 +312,162 @@ def run_manual_review_phase(
         run_ctx.stats["manual_review_leads"] = len(leads)
 
 
+def run_audit_generation_phase(
+    config: Config,
+    db: Database,
+    run_ctx: RunContext,
+    shutdown: GracefulShutdown,
+) -> int:
+    """Phase 4: Generate audit pages for qualifying leads without audits."""
+    if not config.outreach.enabled:
+        logger.info("Outreach disabled, skipping audit generation")
+        return 0
+
+    leads = db.get_leads_without_audits(
+        min_score=config.outreach.min_score_for_outreach
+    )
+    if not leads:
+        logger.info("No leads need audit pages")
+        return 0
+
+    logger.info(f"Generating audits for {len(leads)} leads")
+    generated = 0
+
+    for lead in leads:
+        if shutdown.check():
+            logger.warning("Shutdown requested, stopping audit generation")
+            break
+
+        audit_url, file_path = generate_audit_page(lead, config)
+        if audit_url:
+            issues_json = get_issues_json(lead)
+            db.record_audit(lead["place_id"], audit_url, file_path, issues_json)
+            generated += 1
+
+    logger.info(f"Generated {generated} audit pages")
+    run_ctx.increment("audits_generated", generated)
+    return generated
+
+
+def run_contact_finding_phase(
+    config: Config,
+    db: Database,
+    run_ctx: RunContext,
+    shutdown: GracefulShutdown,
+) -> int:
+    """Phase 5: Find contact emails for leads without contacts."""
+    if not config.outreach.enabled:
+        logger.info("Outreach disabled, skipping contact finding")
+        return 0
+
+    leads = db.get_leads_without_contacts()
+    if not leads:
+        logger.info("No leads need contact discovery")
+        return 0
+
+    logger.info(f"Finding contacts for {len(leads)} leads")
+    found = 0
+
+    for lead in leads:
+        if shutdown.check():
+            logger.warning("Shutdown requested, stopping contact finding")
+            break
+
+        website = lead.get("website")
+        if not website:
+            continue
+
+        contact, error = find_contact_with_isolation(website)
+        if contact:
+            db.record_contact(
+                lead["place_id"], contact.email, contact.source, contact.confidence
+            )
+            found += 1
+
+    logger.info(f"Found contacts for {found} leads")
+    run_ctx.increment("contacts_found", found)
+    return found
+
+
+def run_outreach_phase(
+    config: Config,
+    db: Database,
+    run_ctx: RunContext,
+    shutdown: GracefulShutdown,
+    dry_run: bool = False,
+) -> int:
+    """Phase 6: Send outreach emails to qualifying leads."""
+    if not config.outreach.enabled:
+        logger.info("Outreach disabled, skipping")
+        return 0
+
+    leads = db.get_leads_ready_for_outreach(
+        min_score=config.outreach.min_score_for_outreach
+    )
+    if not leads:
+        logger.info("No leads ready for outreach")
+        return 0
+
+    logger.info(f"Found {len(leads)} leads ready for outreach")
+
+    if dry_run:
+        logger.info(f"[DRY-RUN] Would send outreach to {len(leads)} leads")
+        return 0
+
+    sent = run_outreach(leads, db, config.smtp, config.outreach, shutdown)
+    run_ctx.increment("outreach_sent", sent)
+    return sent
+
+
+def run_warm_delivery_phase(
+    config: Config,
+    db: Database,
+    run_ctx: RunContext,
+    dry_run: bool = False,
+) -> bool:
+    """Phase 7: Deliver warm (engaged) leads to subscribers."""
+    if not config.outreach.enabled:
+        return True
+
+    warm_leads = db.get_warm_leads(
+        min_engagement_score=config.delivery.warm_lead_min_engagement
+    )
+    if not warm_leads:
+        logger.info("No warm leads to deliver")
+        return True
+
+    logger.info(f"Found {len(warm_leads)} warm leads")
+
+    if dry_run:
+        logger.info(f"[DRY-RUN] Would deliver {len(warm_leads)} warm leads")
+        return True
+
+    subscribers, sub_error = get_subscribers_with_isolation(
+        config=config.gumroad, retry_config=config.retry
+    )
+    if sub_error:
+        logger.error(f"Failed to get subscribers for warm delivery: {sub_error}")
+        return False
+
+    if not subscribers:
+        logger.warning("No subscribers for warm lead delivery")
+        return True
+
+    results, error = deliver_warm_leads_with_isolation(subscribers, warm_leads, config)
+    if error:
+        logger.error(f"Warm lead delivery error: {error}")
+        return False
+
+    success_count = sum(1 for r in results if r.get("success"))
+    logger.info(f"Delivered warm leads to {success_count}/{len(subscribers)} subscribers")
+    return success_count > 0
+
+
 def run_weekly(
     config: Config = None,
     skip_scrape: bool = False,
     skip_delivery: bool = False,
+    skip_outreach: bool = False,
     dry_run: bool = False,
 ):
     """
@@ -321,6 +477,7 @@ def run_weekly(
         config: Configuration (loads from env if not provided)
         skip_scrape: Skip scraping phase (use existing DB leads)
         skip_delivery: Skip delivery phase (scrape only)
+        skip_outreach: Skip outreach phases (audit gen, contact find, send)
         dry_run: Skip all database writes and email sends (for testing)
     """
     if dry_run:
@@ -360,7 +517,7 @@ def run_weekly(
                         db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
 
-            # Phase 2: Delivery
+            # Phase 2: Delivery (cold leads CSV)
             if not skip_delivery:
                 logger.info("=== Phase 2: Delivery ===")
                 run_delivery_phase(config, db, run_ctx, dry_run=dry_run)
@@ -369,6 +526,38 @@ def run_weekly(
             if config.scoring.manual_review_enabled and not dry_run:
                 logger.info("=== Phase 3: Manual Review Export ===")
                 run_manual_review_phase(config, db, run_ctx)
+
+            # Phase 4: Generate audit pages
+            if not skip_outreach:
+                logger.info("=== Phase 4: Generate Audits ===")
+                run_audit_generation_phase(config, db, run_ctx, shutdown)
+
+                if shutdown.check():
+                    logger.warning("Shutdown during audit phase")
+                    if not dry_run:
+                        db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
+                    return
+
+            # Phase 5: Find contacts
+            if not skip_outreach:
+                logger.info("=== Phase 5: Find Contacts ===")
+                run_contact_finding_phase(config, db, run_ctx, shutdown)
+
+                if shutdown.check():
+                    logger.warning("Shutdown during contact phase")
+                    if not dry_run:
+                        db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
+                    return
+
+            # Phase 6: Send outreach
+            if not skip_outreach:
+                logger.info("=== Phase 6: Send Outreach ===")
+                run_outreach_phase(config, db, run_ctx, shutdown, dry_run=dry_run)
+
+            # Phase 7: Deliver warm leads
+            if not skip_outreach and not skip_delivery:
+                logger.info("=== Phase 7: Deliver Warm Leads ===")
+                run_warm_delivery_phase(config, db, run_ctx, dry_run=dry_run)
 
             # Complete run (skip in dry-run)
             if not dry_run:
@@ -424,6 +613,16 @@ Examples:
         help="Validate configuration and exit",
     )
     parser.add_argument(
+        "--outreach-only",
+        action="store_true",
+        help="Only run outreach phases (audit gen, contact find, send, warm delivery)",
+    )
+    parser.add_argument(
+        "--no-outreach",
+        action="store_true",
+        help="Skip outreach phases (original pipeline only)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Run without database writes or email sends (for testing)",
@@ -458,8 +657,9 @@ Examples:
 
     run_weekly(
         config=config,
-        skip_scrape=args.deliver_only,
-        skip_delivery=args.scrape_only,
+        skip_scrape=args.deliver_only or args.outreach_only,
+        skip_delivery=args.scrape_only or args.outreach_only,
+        skip_outreach=args.no_outreach,
         dry_run=args.dry_run,
     )
 

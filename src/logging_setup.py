@@ -83,6 +83,9 @@ class RunContext:
             "leads_exported": 0,
             "emails_sent": 0,
             "manual_review_leads": 0,
+            "audits_generated": 0,
+            "contacts_found": 0,
+            "outreach_sent": 0,
             "errors": 0,
         }
 

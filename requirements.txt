@@ -7,6 +7,16 @@ playwright>=1.40.0
 # HTTP requests for website scoring
 requests>=2.31.0
 
+# HTML parsing for contact finder
+beautifulsoup4>=4.12.0
+
+# Template engine for audit pages
+Jinja2>=3.1.0
+
+# ASGI server for tracking endpoints
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
 # No other dependencies - using stdlib for everything else:
 # - sqlite3 (database)
 # - smtplib (email)

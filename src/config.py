@@ -132,6 +132,35 @@ class DatabaseConfig:
 
 
 @dataclass
+class OutreachConfig:
+    """Outreach/warm lead configuration."""
+    enabled: bool = field(default_factory=lambda: os.environ.get("OUTREACH_ENABLED", "true").lower() == "true")
+
+    # Sending limits
+    max_emails_per_day: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_DAY", "100")))
+    max_emails_per_hour: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_HOUR", "20")))
+    delay_between_emails_seconds: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_DELAY_SECONDS", "30")))
+
+    # Thresholds
+    min_score_for_outreach: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MIN_SCORE", "50")))
+    min_contact_confidence: float = field(default_factory=lambda: float(os.environ.get("OUTREACH_MIN_CONFIDENCE", "0.7")))
+
+    # Compliance (CAN-SPAM)
+    physical_address: str = field(default_factory=lambda: os.environ.get("OUTREACH_PHYSICAL_ADDRESS", ""))
+    company_name: str = field(default_factory=lambda: os.environ.get("OUTREACH_COMPANY_NAME", "BrokenSite Weekly"))
+
+    # Tracking
+    tracking_base_url: str = field(default_factory=lambda: os.environ.get("TRACKING_BASE_URL", ""))
+
+
+@dataclass
+class DeliveryConfig:
+    """Delivery configuration for warm vs cold leads."""
+    include_cold_leads: bool = field(default_factory=lambda: os.environ.get("DELIVERY_INCLUDE_COLD", "true").lower() == "true")
+    warm_lead_min_engagement: int = field(default_factory=lambda: int(os.environ.get("WARM_LEAD_MIN_ENGAGEMENT", "25")))
+
+
+@dataclass
 class Config:
     """Main configuration container."""
     scraper: ScraperConfig = field(default_factory=ScraperConfig)
@@ -140,6 +169,8 @@ class Config:
     smtp: SMTPConfig = field(default_factory=SMTPConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
+    outreach: OutreachConfig = field(default_factory=OutreachConfig)
+    delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
 
     # Search queries - niches to target
     search_queries: List[str] = field(default_factory=lambda: [
@@ -193,5 +224,12 @@ def validate_config(config: Config) -> List[str]:
         errors.append("SMTP_PASSWORD environment variable not set")
     if not config.smtp.from_email:
         errors.append("SMTP_FROM_EMAIL environment variable not set")
+
+    # Outreach configuration validation
+    if config.outreach.enabled:
+        if not config.outreach.tracking_base_url:
+            errors.append("TRACKING_BASE_URL environment variable not set (required for outreach)")
+        if not config.outreach.physical_address:
+            errors.append("OUTREACH_PHYSICAL_ADDRESS environment variable not set (required for CAN-SPAM compliance)")
 
     return errors

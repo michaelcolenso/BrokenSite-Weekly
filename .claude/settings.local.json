@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python:*)",
+      "Bash(python -c:*)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "postgresql"
+  ],
+  "enableAllProjectMcpServers": true
+}
