@@ -68,6 +68,7 @@ def test_database(database_config: DatabaseConfig) -> Generator[Database, None, 
     """Initialized test database."""
     db = Database(database_config)
     yield db
+    db.close()
     # Cleanup is automatic via tmp_path fixture
 
 

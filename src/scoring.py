@@ -38,6 +38,21 @@ USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
+_SESSION: Optional[requests.Session] = None
+
+
+def _get_session() -> requests.Session:
+    global _SESSION
+    if _SESSION is None:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        })
+        _SESSION = session
+    return _SESSION
+
 
 @dataclass
 class ScoringResult:
@@ -501,17 +516,12 @@ def fetch_website(
     """
     url = _normalize_url(url)
 
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
+    session = _get_session()
 
     def do_fetch(fetch_url: str):
-        return requests.get(
+        return session.get(
             fetch_url,
             timeout=config.request_timeout_seconds,
-            headers=headers,
             allow_redirects=True,
             verify=True,  # Verify SSL
         )

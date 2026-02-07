@@ -4,6 +4,7 @@ Lead utility helpers for tiering, marketing signals, and outreach pitch.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
@@ -26,6 +27,14 @@ def parse_reasons(reasons: str | Iterable[str] | None) -> list[str]:
     if not reasons:
         return []
     if isinstance(reasons, str):
+        stripped = reasons.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(r).strip() for r in parsed if str(r).strip()]
+            except json.JSONDecodeError:
+                pass
         return [r.strip() for r in reasons.split(",") if r.strip()]
     return [str(r).strip() for r in reasons if str(r).strip()]
 
