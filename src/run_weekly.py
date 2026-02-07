@@ -6,17 +6,18 @@ Coordinates scraping, scoring, deduplication, and delivery.
 Designed for unattended VPS operation via systemd timer.
 """
 
+from __future__ import annotations
+
 import sys
 import signal
 import argparse
 from datetime import datetime
 from typing import Optional
+from dataclasses import asdict
 
-from .config import load_config, validate_config, Config
+from .config import load_config, validate_config, Config, OUTPUT_DIR
 from .logging_setup import setup_logging, RunContext, get_logger
 from .db import Database, Lead
-from .maps_scraper import scrape_with_isolation, Business
-from .scoring import evaluate_with_isolation, ScoringResult
 from .gumroad import get_subscribers_with_isolation
 from .delivery import deliver_with_isolation, generate_csv, generate_manual_review_csv
 from .audit_generator import generate_audit_page, get_issues_json
@@ -102,7 +103,9 @@ def process_business(
         run_ctx.increment("websites_checked")
 
         # Score the website
-        result: ScoringResult = evaluate_with_isolation(
+        from .scoring import evaluate_with_isolation
+
+        result = evaluate_with_isolation(
             url=business.website,
             config=config.scoring,
             retry_config=config.retry,
@@ -185,6 +188,8 @@ def run_scraping_phase(
     """
     qualifying_leads = []
 
+    from .maps_scraper import scrape_with_isolation
+
     for city in config.target_cities:
         if shutdown.check():
             logger.warning("Shutdown requested, stopping scrape phase")
@@ -221,6 +226,62 @@ def run_scraping_phase(
                     qualifying_leads.append(lead)
 
     return qualifying_leads
+
+
+def run_export_csv_phase(
+    *,
+    config: Config,
+    db: Database,
+    run_ctx: RunContext,
+    scraped_qualifying_leads: Optional[list[Lead]] = None,
+    label: str = "local",
+) -> list[str]:
+    """Generate local CSV(s) without emailing or marking leads as exported.
+
+    If `scraped_qualifying_leads` is provided, exports that in-memory set.
+    Otherwise exports from the existing DB using unexported-lead queries.
+    Returns list of CSV file paths (as strings).
+    """
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    csv_paths: list[str] = []
+
+    if scraped_qualifying_leads is not None:
+        leads = [asdict(l) for l in scraped_qualifying_leads]
+        csv_filename = f"broken_site_leads_{date_str}_{label}_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(leads, output_path=OUTPUT_DIR / csv_filename)
+        csv_paths.append(str(csv_path))
+        logger.info(f"Local CSV report created: {csv_path} ({len(leads)} leads)")
+        return csv_paths
+
+    # Export from existing DB (use the same tier logic as delivery, but no subscribers/SMTP).
+    leads_pro = db.get_unexported_leads_for_tier(
+        min_score=config.scoring.min_score_to_include,
+        tier="pro",
+        limit=500,
+    )
+    leads_basic = db.get_unexported_leads_for_tier(
+        min_score=config.scoring.min_score_to_include,
+        tier="basic",
+        limit=500,
+    )
+
+    if not leads_pro and not leads_basic:
+        logger.info("No unexported leads available to write CSV")
+        return csv_paths
+
+    if leads_pro:
+        csv_filename = f"broken_site_leads_{date_str}_pro_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(leads_pro, output_path=OUTPUT_DIR / csv_filename)
+        csv_paths.append(str(csv_path))
+        logger.info(f"Local CSV report created: {csv_path} ({len(leads_pro)} pro leads)")
+
+    if leads_basic:
+        csv_filename = f"broken_site_leads_{date_str}_basic_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(leads_basic, output_path=OUTPUT_DIR / csv_filename)
+        csv_paths.append(str(csv_path))
+        logger.info(f"Local CSV report created: {csv_path} ({len(leads_basic)} basic leads)")
+
+    return csv_paths
 
 
 def run_delivery_phase(
@@ -578,6 +639,7 @@ def run_weekly(
     skip_delivery: bool = False,
     skip_outreach: bool = False,
     dry_run: bool = False,
+    export_csv: bool = False,
 ):
     """
     Main weekly run entry point.
@@ -588,6 +650,7 @@ def run_weekly(
         skip_delivery: Skip delivery phase (scrape only)
         skip_outreach: Skip outreach phases (audit gen, contact find, send)
         dry_run: Skip all database writes and email sends (for testing)
+        export_csv: Generate local CSV report(s) without emailing or marking exported
     """
     if dry_run:
         logger.info("=== DRY-RUN MODE: No database writes or emails will be sent ===")
@@ -615,16 +678,31 @@ def run_weekly(
             db.start_run(run_ctx.run_id)
 
         try:
+            scraped_qualifying_leads: Optional[list[Lead]] = None
+
             # Phase 1: Scraping
             if not skip_scrape:
                 logger.info("=== Phase 1: Scraping ===")
-                run_scraping_phase(config, db, run_ctx, shutdown, dry_run=dry_run)
+                scraped_qualifying_leads = run_scraping_phase(
+                    config, db, run_ctx, shutdown, dry_run=dry_run
+                )
 
                 if shutdown.check():
                     logger.warning("Shutdown during scrape phase")
                     if not dry_run:
                         db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
+
+            # Optional: Local CSV export (no emails, no export marking)
+            if export_csv:
+                logger.info("=== Local CSV Export ===")
+                run_export_csv_phase(
+                    config=config,
+                    db=db,
+                    run_ctx=run_ctx,
+                    scraped_qualifying_leads=scraped_qualifying_leads,
+                    label="local",
+                )
 
             # Phase 2: Delivery (cold leads CSV)
             if not skip_delivery:
@@ -696,6 +774,7 @@ Examples:
   python -m src.run_weekly --deliver-only   # Deliver existing leads only
   python -m src.run_weekly --dry-run        # Test run with no side effects
   python -m src.run_weekly --scrape-only --dry-run  # Test scraping only
+  python -m src.run_weekly --export-csv --dry-run    # Local CSV report, no emails
   python -m src.run_weekly --stats          # Show database stats
   python -m src.run_weekly --validate       # Check configuration
         """
@@ -736,6 +815,11 @@ Examples:
         action="store_true",
         help="Run without database writes or email sends (for testing)",
     )
+    parser.add_argument(
+        "--export-csv",
+        action="store_true",
+        help="Write local CSV report(s) without emailing or marking leads exported",
+    )
 
     args = parser.parse_args()
 
@@ -767,9 +851,10 @@ Examples:
     run_weekly(
         config=config,
         skip_scrape=args.deliver_only or args.outreach_only,
-        skip_delivery=args.scrape_only or args.outreach_only,
-        skip_outreach=args.no_outreach,
+        skip_delivery=args.scrape_only or args.outreach_only or args.export_csv,
+        skip_outreach=args.no_outreach or args.export_csv,
         dry_run=args.dry_run,
+        export_csv=args.export_csv,
     )
 
 

@@ -39,15 +39,15 @@ sudo chown brokensite:brokensite /opt/brokensite-weekly
 # Clone repository (or copy files)
 sudo -u brokensite git clone https://github.com/YOUR_REPO/BrokenSite-Weekly.git /opt/brokensite-weekly
 
-# Create virtual environment
+# Create virtual environment + install deps (uv)
+# Install uv first: https://docs.astral.sh/uv/
 cd /opt/brokensite-weekly
-sudo -u brokensite python3.11 -m venv venv
-
-# Install Python dependencies
-sudo -u brokensite ./venv/bin/pip install -r requirements.txt
+sudo -u brokensite uv venv venv --python 3.11
+# If `venv/` already exists and this errors, delete/recreate it.
+sudo -u brokensite uv pip install -r requirements.txt --python /opt/brokensite-weekly/venv/bin/python
 
 # Install Playwright browsers
-sudo -u brokensite ./venv/bin/playwright install chromium
+sudo -u brokensite /opt/brokensite-weekly/venv/bin/playwright install chromium
 ```
 
 ## 3. Configuration
@@ -100,7 +100,7 @@ sudo -u brokensite mkdir -p /opt/brokensite-weekly/{data,logs,output,debug}
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --validate
 
 # Run a test scrape (no delivery)
-sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --scrape-only
+sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --scrape-only --dry-run --no-outreach
 
 # Check results
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --stats

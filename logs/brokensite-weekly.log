@@ -379,3 +379,19 @@
 2026-01-30 00:16:21 [INFO] brokensite.orchestrator.process_business: Lead: All Weather HVAC Denver | http://allweatherhvacdenver.com/ | Score: 95 | Reasons: ['dns_failed']
 2026-01-30 00:17:09 [INFO] brokensite.maps_scraper.scrape_businesses: Scraping: roofing contractor in Denver, CO
 2026-01-30 00:17:24 [INFO] brokensite.maps_scraper.scrape_businesses: Found 53 business cards for: roofing contractor in Denver, CO
+2026-02-05 00:37:56 [INFO] brokensite.orchestrator.run_weekly: === DRY-RUN MODE: No database writes or emails will be sent ===
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: GUMROAD_ACCESS_TOKEN environment variable not set
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: GUMROAD_PRODUCT_ID or GUMROAD_PRODUCTS_JSON not set
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: SMTP_USERNAME environment variable not set
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: SMTP_PASSWORD environment variable not set
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: SMTP_FROM_EMAIL environment variable not set
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: TRACKING_BASE_URL environment variable not set (required for outreach)
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: OUTREACH_PHYSICAL_ADDRESS environment variable not set (required for CAN-SPAM compliance)
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Config error: PORTAL_SECRET environment variable not set (required for portal links)
+2026-02-05 00:37:56 [ERROR] brokensite.orchestrator.run_weekly: Cannot proceed with invalid configuration
+2026-02-05 00:39:16 [INFO] brokensite.orchestrator.run_weekly: === DRY-RUN MODE: No database writes or emails will be sent ===
+2026-02-05 00:39:16 [INFO] brokensite.db._init_schema: Database initialized at /Users/michaelcolenso/Projects/BrokenSite-Weekly/data/leads.db
+2026-02-05 00:39:16 [INFO] brokensite.orchestrator.__enter__: === Weekly run started: 20260205_083916 ===
+2026-02-05 00:39:16 [INFO] brokensite.orchestrator.run_weekly: === Phase 1: Scraping ===
+2026-02-05 00:39:16 [INFO] brokensite.maps_scraper.scrape_businesses: Scraping: plumber in Austin, TX
+2026-02-05 00:39:32 [INFO] brokensite.maps_scraper.scrape_businesses: Found 53 business cards for: plumber in Austin, TX

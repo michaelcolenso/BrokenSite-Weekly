@@ -16,17 +16,24 @@ Fully unattended weekly lead-generation system for local businesses with broken/
 # Clone and setup
 git clone https://github.com/YOUR_REPO/BrokenSite-Weekly.git
 cd BrokenSite-Weekly
-python3 -m venv venv
-./venv/bin/pip install -r requirements.txt
+
+# Python env + deps (uv)
+# Install uv first: https://docs.astral.sh/uv/
+uv venv venv --python 3.11
+# If `venv/` already exists and this errors, delete/recreate it.
+uv pip install -r requirements.txt --python ./venv/bin/python
 ./venv/bin/playwright install chromium
 
-# Configure
+# Configure (optional for scrape-only tests; required for delivery/outreach)
 cp .env.example .env
 nano .env  # Add your Gumroad + SMTP credentials
 
+# Load env for this shell (run_weekly does not auto-load .env)
+set -a; source ./.env; set +a
+
 # Test
 ./venv/bin/python -m src.run_weekly --validate
-./venv/bin/python -m src.run_weekly --scrape-only
+./venv/bin/python -m src.run_weekly --export-csv --dry-run
 ```
 
 See [SETUP.md](SETUP.md) for full VPS deployment instructions.
