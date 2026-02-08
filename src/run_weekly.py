@@ -61,11 +61,6 @@ def process_business(
         dry_run: If True, skip database writes (scoring still happens).
     """
     try:
-        # Check for duplicate (skip in dry-run to show what would be processed)
-        if not dry_run and db.is_duplicate(business.place_id, business.website):
-            logger.debug(f"Skipping {business.name}: duplicate")
-            return None
-
         # Handle no-website leads (optional)
         if not business.website:
             if not config.scoring.include_no_website_leads:
@@ -83,7 +78,7 @@ def process_business(
                 city=business.city,
                 category=business.category,
                 score=config.scoring.weight_no_website,
-                reasons="no_website",
+                reasons=["no_website"],
                 first_seen=datetime.utcnow(),
                 last_seen=datetime.utcnow(),
                 lead_tier=compute_lead_tier(config.scoring.weight_no_website),
@@ -94,7 +89,7 @@ def process_business(
             if lead.score >= config.scoring.min_score_to_include:
                 logger.info(
                     f"Lead: {business.name} | no website | "
-                    f"Score: {lead.score} | Reasons: {lead.reasons}"
+                    f"Score: {lead.score} | Reasons: {','.join(lead.reasons)}"
                 )
                 return lead
 
@@ -111,7 +106,7 @@ def process_business(
             retry_config=config.retry,
         )
 
-        reasons_str = ",".join(result.reasons)
+        reasons_list = list(result.reasons)
         lead_tier = compute_lead_tier(result.score)
         exclusive_until = None
         exclusive_tier = None
@@ -137,7 +132,7 @@ def process_business(
             city=business.city,
             category=business.category,
             score=result.score,
-            reasons=reasons_str,
+            reasons=reasons_list,
             first_seen=datetime.utcnow(),
             last_seen=datetime.utcnow(),
             exclusive_until=exclusive_until,
@@ -157,7 +152,7 @@ def process_business(
         if result.score >= config.scoring.min_score_to_include:
             logger.info(
                 f"Lead: {business.name} | {business.website} | "
-                f"Score: {result.score} | Reasons: {result.reasons}"
+                f"Score: {result.score} | Reasons: {','.join(result.reasons)}"
             )
             return lead
         else:
