@@ -395,3 +395,15 @@
 2026-02-05 00:39:16 [INFO] brokensite.orchestrator.run_weekly: === Phase 1: Scraping ===
 2026-02-05 00:39:16 [INFO] brokensite.maps_scraper.scrape_businesses: Scraping: plumber in Austin, TX
 2026-02-05 00:39:32 [INFO] brokensite.maps_scraper.scrape_businesses: Found 53 business cards for: plumber in Austin, TX
+2026-02-06 23:30:05 [INFO] brokensite.orchestrator.run_weekly: === DRY-RUN MODE: No database writes or emails will be sent ===
+2026-02-06 23:30:05 [INFO] brokensite.db._init_schema: Database initialized at /Users/michaelcolenso/Projects/BrokenSite-Weekly/data/leads.db
+2026-02-06 23:30:05 [INFO] brokensite.orchestrator.__enter__: === Weekly run started: 20260207_073005 ===
+2026-02-06 23:30:05 [INFO] brokensite.orchestrator.run_weekly: === Phase 1: Scraping ===
+2026-02-06 23:30:05 [INFO] brokensite.maps_scraper.scrape_businesses: Scraping: plumber in Austin, TX
+2026-02-06 23:30:21 [INFO] brokensite.maps_scraper.scrape_businesses: Found 53 business cards for: plumber in Austin, TX
+2026-02-06 23:36:09 [INFO] brokensite.maps_scraper.scrape_businesses: Successfully scraped 49 businesses for: plumber in Austin, TX
+2026-02-06 23:36:21 [INFO] brokensite.orchestrator.process_business: Lead: Plumb Masters, Inc. | https://m.facebook.com/plumb.masters/ | Score: 60 | Reasons: ['social_only']
+2026-02-06 23:37:05 [INFO] brokensite.orchestrator.process_business: Lead: Benjamin Franklin Plumbing of Central Austin | https://www.benjaminfranklinplumbing.com/central-austin/ | Score: 70 | Reasons: ['under_construction', 'has_gtm']
+2026-02-06 23:37:08 [INFO] brokensite.orchestrator.process_business: Lead: Plumb Quick | http://www.plumbquickinc.com/ | Score: 43 | Reasons: ['missing_meta_description', 'missing_h1', 'copyright_2024']
+2026-02-06 23:37:11 [INFO] brokensite.maps_scraper.scrape_businesses: Scraping: electrician in Austin, TX
+2026-02-06 23:37:26 [INFO] brokensite.maps_scraper.scrape_businesses: Found 53 business cards for: electrician in Austin, TX
