@@ -440,6 +440,29 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (run_id, subscriber_email, lead_count, csv_path, datetime.utcnow(), tier, export_type))
 
+
+    def get_top_yield_city_categories(
+        self,
+        *,
+        min_score_for_quality: int = 60,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Return top city/category combos by lead volume and quality."""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT
+                    city,
+                    category,
+                    COUNT(*) AS lead_count,
+                    ROUND(AVG(score), 1) AS avg_score,
+                    SUM(CASE WHEN score >= ? THEN 1 ELSE 0 END) AS quality_lead_count
+                FROM leads
+                GROUP BY city, category
+                ORDER BY quality_lead_count DESC, lead_count DESC, avg_score DESC
+                LIMIT ?
+            """, (min_score_for_quality, limit)).fetchall()
+            return [dict(row) for row in rows]
+
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
         with self._connect() as conn:
