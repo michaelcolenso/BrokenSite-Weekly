@@ -531,7 +531,8 @@ def run_outreach_phase(
         return 0
 
     leads = db.get_leads_ready_for_outreach(
-        min_score=config.outreach.min_score_for_outreach
+        min_score=config.outreach.min_score_for_outreach,
+        min_confidence=config.outreach.min_contact_confidence,
     )
     if leads:
         logger.info(f"Found {len(leads)} leads ready for outreach")
