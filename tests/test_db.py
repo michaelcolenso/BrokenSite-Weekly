@@ -479,3 +479,45 @@ class TestStats:
         assert stats["unique_websites"] == 1
         assert stats["total_runs"] == 1
         assert stats["last_run"]["run_id"] == "run_001"
+
+
+class TestOutreachReadiness:
+    """Tests for outreach lead filtering."""
+
+    def test_filters_by_configured_min_confidence(self, test_database):
+        now = datetime.utcnow()
+        lead = Lead(
+            place_id="outreach_place",
+            cid="cid-1",
+            name="Outreach Biz",
+            website="https://outreach.example",
+            address="123 Main",
+            phone="555-0100",
+            city="Austin, TX",
+            category="plumber",
+            score=80,
+            reasons="ssl_error",
+            first_seen=now,
+            last_seen=now,
+        )
+        test_database.upsert_lead(lead)
+
+        with test_database._connect() as conn:
+            conn.execute(
+                "INSERT INTO audits (place_id, audit_url, audit_html_path, generated_at, issues_json) VALUES (?, ?, ?, ?, ?)",
+                (lead.place_id, "https://audits.example/outreach_place", "output/audit.html", now, "[]"),
+            )
+
+        test_database.record_contact(
+            place_id=lead.place_id,
+            email="owner@outreach.example",
+            source="test",
+            confidence=0.75,
+        )
+
+        strict = test_database.get_leads_ready_for_outreach(min_score=50, min_confidence=0.8)
+        relaxed = test_database.get_leads_ready_for_outreach(min_score=50, min_confidence=0.7)
+
+        assert strict == []
+        assert len(relaxed) == 1
+        assert relaxed[0]["place_id"] == lead.place_id

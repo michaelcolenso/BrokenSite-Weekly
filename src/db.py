@@ -551,10 +551,14 @@ class Database:
                 WHERE place_id = ?
             """, (datetime.utcnow(), success, error, place_id))
 
-    def get_leads_ready_for_outreach(self, min_score: int) -> List[Dict[str, Any]]:
+    def get_leads_ready_for_outreach(
+        self,
+        min_score: int,
+        min_confidence: float = 0.7,
+    ) -> List[Dict[str, Any]]:
         """
         Get leads that have audit + contact but haven't been contacted and aren't unsubscribed.
-        Only returns leads with confidence >= 0.7.
+        Only returns leads with confidence >= min_confidence.
         """
         with self._connect() as conn:
             rows = conn.execute("""
@@ -567,11 +571,11 @@ class Database:
                 LEFT JOIN outreach o ON l.place_id = o.place_id
                 LEFT JOIN unsubscribes u ON l.place_id = u.place_id
                 WHERE l.score >= ?
-                  AND c.confidence >= 0.7
+                  AND c.confidence >= ?
                   AND o.place_id IS NULL
                   AND u.place_id IS NULL
                 ORDER BY l.score DESC, c.confidence DESC
-            """, (min_score,)).fetchall()
+            """, (min_score, min_confidence)).fetchall()
 
             return [dict(row) for row in rows]
 
