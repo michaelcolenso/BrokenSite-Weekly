@@ -8,6 +8,7 @@ import logging.handlers
 import sys
 from pathlib import Path
 from datetime import datetime
+from time import perf_counter
 
 from .config import LOG_DIR
 
@@ -75,6 +76,7 @@ class RunContext:
         self.logger = logger
         self.run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         self.start_time = None
+        self._active_phase_start: dict[str, float] = {}
         self.stats = {
             "queries_attempted": 0,
             "queries_succeeded": 0,
@@ -88,6 +90,8 @@ class RunContext:
             "outreach_sent": 0,
             "followups_sent": 0,
             "errors": 0,
+            "phase_durations_seconds": {},
+            "reason_counts": {},
         }
 
     def __enter__(self):
@@ -110,3 +114,25 @@ class RunContext:
         """Increment a stat counter."""
         if stat in self.stats:
             self.stats[stat] += amount
+
+    def start_phase(self, phase_name: str):
+        """Start a phase timer."""
+        self._active_phase_start[phase_name] = perf_counter()
+
+    def end_phase(self, phase_name: str) -> float:
+        """Stop a phase timer and store cumulative duration in stats."""
+        start = self._active_phase_start.pop(phase_name, None)
+        if start is None:
+            return 0.0
+        duration = perf_counter() - start
+        phase_durations = self.stats.setdefault("phase_durations_seconds", {})
+        phase_durations[phase_name] = phase_durations.get(phase_name, 0.0) + duration
+        return duration
+
+    def count_reasons(self, reasons: list[str]):
+        """Track frequency histogram for scoring reasons."""
+        if not reasons:
+            return
+        reason_counts = self.stats.setdefault("reason_counts", {})
+        for reason in reasons:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
