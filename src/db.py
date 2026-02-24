@@ -3,10 +3,12 @@ SQLite database layer for BrokenSite-Weekly.
 Handles lead storage, deduplication, and run history.
 """
 
+import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -27,7 +29,7 @@ class Lead:
     city: str
     category: str
     score: int
-    reasons: str
+    reasons: List[str] | str
     first_seen: datetime
     last_seen: datetime
     review_count: Optional[int] = None
@@ -177,6 +179,13 @@ class Database:
         self.config = config or DatabaseConfig()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.db_path = self.config.db_path
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(
+            self.db_path,
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
+        )
+        self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
     def _init_schema(self):
@@ -225,19 +234,42 @@ class Database:
     @contextmanager
     def _connect(self):
         """Context manager for database connections."""
-        conn = sqlite3.connect(
-            self.db_path,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES
-        )
-        conn.row_factory = sqlite3.Row
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def close(self) -> None:
+        """Close the shared database connection."""
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+
+    def __del__(self):
         try:
-            yield conn
-            conn.commit()
+            self.close()
         except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            pass
+
+    def _serialize_reasons(self, reasons: Optional[Iterable[str] | str]) -> str:
+        if not reasons:
+            return json.dumps([])
+        if isinstance(reasons, str):
+            stripped = reasons.strip()
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return json.dumps([str(r) for r in parsed if str(r).strip()])
+                except json.JSONDecodeError:
+                    pass
+            items = [r.strip() for r in reasons.split(",") if r.strip()]
+            return json.dumps(items)
+        return json.dumps([str(r).strip() for r in reasons if str(r).strip()])
 
     def is_duplicate(self, place_id: str, website: Optional[str] = None) -> bool:
         """
@@ -272,6 +304,7 @@ class Database:
         """
         now = datetime.utcnow()
         cutoff = now - timedelta(days=self.config.dedupe_window_days)
+        reasons_json = self._serialize_reasons(lead.reasons)
 
         with self._connect() as conn:
             row = conn.execute("""
@@ -300,7 +333,7 @@ class Database:
             """, (
                 lead.place_id, lead.cid, lead.name, lead.website,
                 lead.address, lead.phone, lead.review_count, lead.city, lead.category,
-                lead.score, lead.reasons, now, now,
+                lead.score, reasons_json, now, now,
                 lead.exclusive_until, lead.exclusive_tier, lead.lead_tier,
                 cutoff
             )).fetchone()

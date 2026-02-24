@@ -12,6 +12,7 @@ from typing import List, Dict, Optional, Tuple
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
 from .config import PROJECT_ROOT, OUTPUT_DIR
+from .lead_utils import parse_reasons
 from .logging_setup import get_logger
 
 logger = get_logger("audit_generator")
@@ -196,12 +197,10 @@ def _parse_diy_builder(reason: str) -> Optional[Dict[str, str]]:
     }
 
 
-def _parse_reasons(reasons_str: str) -> List[Dict[str, str]]:
-    """Convert comma-separated reasons string into list of issue dicts."""
-    if not reasons_str:
-        return []
+def _parse_reasons(reasons_input: str | List[str]) -> List[Dict[str, str]]:
+    """Convert reasons into list of issue dicts."""
     issues = []
-    for reason in (r.strip() for r in reasons_str.split(",")):
+    for reason in parse_reasons(reasons_input):
         if not reason:
             continue
         if reason in NON_ISSUE_REASONS:

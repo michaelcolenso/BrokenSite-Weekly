@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 from .audit_generator import ISSUE_DESCRIPTIONS
 from .config import OutreachConfig, SMTPConfig
 from .contact_finder import ContactInfo
+from .lead_utils import parse_reasons
 from .logging_setup import get_logger
 
 logger = get_logger("outreach")
@@ -116,26 +117,20 @@ class OutreachResult:
     permanent_failure: bool = False
 
 
-def _format_issue_summary(reasons: str, max_issues: int = 3) -> str:
+def _format_issue_summary(reasons: str | List[str], max_issues: int = 3) -> str:
     """Format top issues as plain-text bullet points."""
-    if not reasons:
-        return ""
     summaries = []
-    for reason in reasons.split(",")[:max_issues]:
-        reason = reason.strip()
+    for reason in parse_reasons(reasons)[:max_issues]:
         desc = ISSUE_DESCRIPTIONS.get(reason)
         if desc:
             summaries.append(f"  - {desc['title']}: {desc['description'][:100]}...")
     return "\n".join(summaries) if summaries else "  - Multiple website issues detected"
 
 
-def _format_issue_summary_html(reasons: str, max_issues: int = 3) -> str:
+def _format_issue_summary_html(reasons: str | List[str], max_issues: int = 3) -> str:
     """Format top issues as HTML list."""
-    if not reasons:
-        return "<ul><li>Multiple website issues detected</li></ul>"
     items = []
-    for reason in reasons.split(",")[:max_issues]:
-        reason = reason.strip()
+    for reason in parse_reasons(reasons)[:max_issues]:
         desc = ISSUE_DESCRIPTIONS.get(reason)
         if desc:
             items.append(
