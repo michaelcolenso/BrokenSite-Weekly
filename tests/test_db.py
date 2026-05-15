@@ -190,6 +190,44 @@ class TestLeadUpsert:
             assert row["name"] == "Original Name"
             assert row["score"] == 50
 
+    def test_rejects_new_place_with_recent_duplicate_website(self, test_database):
+        """Should reject new place_id when website matches a recent lead."""
+        existing = Lead(
+            place_id="place_a",
+            cid="111",
+            name="Original Business",
+            website="https://duplicate.com",
+            address="1 Main St",
+            phone="555-0001",
+            city="Test City, TX",
+            category="plumber",
+            score=70,
+            reasons="parked_domain",
+            first_seen=datetime.utcnow(),
+            last_seen=datetime.utcnow(),
+        )
+        assert test_database.upsert_lead(existing) is True
+
+        duplicate_site = Lead(
+            place_id="place_b",
+            cid="222",
+            name="Different Place ID",
+            website="https://duplicate.com",
+            address="2 Main St",
+            phone="555-0002",
+            city="Test City, TX",
+            category="plumber",
+            score=80,
+            reasons="ssl_error",
+            first_seen=datetime.utcnow(),
+            last_seen=datetime.utcnow(),
+        )
+        assert test_database.upsert_lead(duplicate_site) is False
+
+        with test_database._connect() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+            assert count == 1
+
 
 class TestDuplicateDetection:
     """Tests for duplicate detection."""

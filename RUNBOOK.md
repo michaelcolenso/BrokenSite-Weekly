@@ -87,6 +87,7 @@ sudo journalctl -u brokensite-weekly.service --since "1 hour ago"
 
 # Database stats
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --stats
+# Includes last completed run age and warns if older than 8 days
 ```
 
 ### Manual Run
@@ -240,9 +241,10 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 
 1. ✅ Check timer fired: `systemctl status brokensite-weekly.timer`
 2. ✅ Check run completed: `journalctl -u brokensite-weekly.service --since "last Sunday"`
-3. ✅ Verify emails sent: check `emails_sent` in logs
-4. ✅ Monitor Gumroad: check subscriber count hasn't dropped
-5. ✅ Check disk space: `df -h /opt/brokensite-weekly`
+3. ✅ Verify cadence and export health: `python -m src.run_weekly --stats`
+4. ✅ Verify emails sent: check `emails_sent` in logs
+5. ✅ Monitor Gumroad: check subscriber count hasn't dropped
+6. ✅ Check disk space: `df -h /opt/brokensite-weekly`
 
 ## Emergency Contacts
 

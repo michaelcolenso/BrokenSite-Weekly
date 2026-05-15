@@ -53,6 +53,8 @@ class ScoringConfig:
 
     # Medium signals (outdated tech, poor mobile)
     weight_http_only: int = 30
+    weight_client_error: int = 40
+    weight_not_found_or_forbidden: int = 50
     weight_outdated_copyright: int = 25  # Copyright year > 2 years old
     weight_flash_detected: int = 40
     weight_missing_viewport: int = 20
@@ -250,28 +252,39 @@ def load_config() -> Config:
     return Config()
 
 
-def validate_config(config: Config) -> List[str]:
-    """Validate configuration and return list of errors."""
+def validate_config(
+    config: Config,
+    *,
+    require_gumroad: bool = True,
+    require_smtp: bool = True,
+    require_outreach: bool = True,
+    require_portal: bool = False,
+) -> List[str]:
+    """Validate configuration and return list of errors for the requested run mode."""
     errors = []
 
-    if not config.gumroad.access_token:
-        errors.append("GUMROAD_ACCESS_TOKEN environment variable not set")
-    if not config.gumroad.product_id and not config.gumroad.products_json:
-        errors.append("GUMROAD_PRODUCT_ID or GUMROAD_PRODUCTS_JSON not set")
-    if not config.smtp.username:
-        errors.append("SMTP_USERNAME environment variable not set")
-    if not config.smtp.password:
-        errors.append("SMTP_PASSWORD environment variable not set")
-    if not config.smtp.from_email:
-        errors.append("SMTP_FROM_EMAIL environment variable not set")
+    if require_gumroad:
+        if not config.gumroad.access_token:
+            errors.append("GUMROAD_ACCESS_TOKEN environment variable not set")
+        if not config.gumroad.product_id and not config.gumroad.products_json:
+            errors.append("GUMROAD_PRODUCT_ID or GUMROAD_PRODUCTS_JSON not set")
+
+    if require_smtp:
+        if not config.smtp.username:
+            errors.append("SMTP_USERNAME environment variable not set")
+        if not config.smtp.password:
+            errors.append("SMTP_PASSWORD environment variable not set")
+        if not config.smtp.from_email:
+            errors.append("SMTP_FROM_EMAIL environment variable not set")
 
     # Outreach configuration validation
-    if config.outreach.enabled:
+    if require_outreach:
         if not config.outreach.tracking_base_url:
             errors.append("TRACKING_BASE_URL environment variable not set (required for outreach)")
         if not config.outreach.physical_address:
             errors.append("OUTREACH_PHYSICAL_ADDRESS environment variable not set (required for CAN-SPAM compliance)")
-    if not config.portal.secret:
+
+    if require_portal and not config.portal.secret:
         errors.append("PORTAL_SECRET environment variable not set (required for portal links)")
 
     return errors

@@ -275,6 +275,7 @@ class Database:
         """
         Check if a lead is a duplicate within the dedupe window.
         Primary key is place_id, but also checks website for fallback matching.
+        Read-only helper: write paths should rely on `upsert_lead()` to avoid races.
         """
         cutoff = datetime.utcnow() - timedelta(days=self.config.dedupe_window_days)
 
@@ -300,13 +301,39 @@ class Database:
 
     def upsert_lead(self, lead: Lead) -> bool:
         """
-        Insert or update a lead. Returns True if this is a new (non-duplicate) lead.
+        Insert or update a lead atomically.
+        Returns True if this lead should be treated as new for the current run.
         """
         now = datetime.utcnow()
         cutoff = now - timedelta(days=self.config.dedupe_window_days)
         reasons_json = self._serialize_reasons(lead.reasons)
 
         with self._connect() as conn:
+            # Serialize dedupe check + write to avoid check-then-insert races.
+            conn.execute("BEGIN IMMEDIATE")
+
+            place_duplicate = conn.execute(
+                "SELECT 1 FROM leads WHERE place_id = ? AND last_seen > ?",
+                (lead.place_id, cutoff),
+            ).fetchone()
+            if place_duplicate:
+                return False
+
+            if lead.website:
+                website_duplicate = conn.execute(
+                    """
+                    SELECT 1
+                    FROM leads
+                    WHERE website = ?
+                      AND place_id != ?
+                      AND last_seen > ?
+                    LIMIT 1
+                    """,
+                    (lead.website, lead.place_id, cutoff),
+                ).fetchone()
+                if website_duplicate:
+                    return False
+
             row = conn.execute("""
                 INSERT INTO leads (
                     place_id, cid, name, website, address, phone,
@@ -504,15 +531,28 @@ class Database:
                 "SELECT COUNT(DISTINCT website) FROM leads WHERE website IS NOT NULL"
             ).fetchone()[0]
             total_runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+            total_exports = conn.execute("SELECT COUNT(*) FROM exports").fetchone()[0]
             last_run = conn.execute(
                 "SELECT run_id, completed_at, status FROM runs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            last_completed_run = conn.execute(
+                """
+                SELECT run_id, started_at, completed_at, status,
+                       queries_attempted, businesses_found, leads_exported, emails_sent
+                FROM runs
+                WHERE completed_at IS NOT NULL
+                ORDER BY completed_at DESC
+                LIMIT 1
+                """
             ).fetchone()
 
             return {
                 "total_leads": total_leads,
                 "unique_websites": unique_websites,
                 "total_runs": total_runs,
+                "total_exports": total_exports,
                 "last_run": dict(last_run) if last_run else None,
+                "last_completed_run": dict(last_completed_run) if last_completed_run else None,
             }
 
     def cleanup_old_leads(self, days: int = 180):

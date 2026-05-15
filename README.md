@@ -32,7 +32,8 @@ nano .env  # Add your Gumroad + SMTP credentials
 set -a; source ./.env; set +a
 
 # Test
-./venv/bin/python -m src.run_weekly --validate
+./venv/bin/python -m src.run_weekly --validate --scrape-only --no-outreach
+./venv/bin/python -m src.run_weekly --validate   # full pipeline requirements
 ./venv/bin/python -m src.run_weekly --export-csv --dry-run
 ```
 

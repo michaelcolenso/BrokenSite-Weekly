@@ -99,6 +99,9 @@ sudo -u brokensite mkdir -p /opt/brokensite-weekly/{data,logs,output,debug}
 # Validate configuration
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --validate
 
+# Validate scrape-only mode (no delivery/outreach credentials required)
+sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --validate --scrape-only --no-outreach
+
 # Run a test scrape (no delivery)
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --scrape-only --dry-run --no-outreach
 

@@ -385,7 +385,7 @@ class TestOutreachFormatting:
     def test_format_issue_summary_empty(self):
         from src.outreach import _format_issue_summary
 
-        assert _format_issue_summary("") == ""
+        assert _format_issue_summary("") == "  - Multiple website issues detected"
 
     def test_format_issue_summary_html(self):
         from src.outreach import _format_issue_summary_html

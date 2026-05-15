@@ -114,6 +114,28 @@ class ScoringQuickWinTests(unittest.TestCase):
         self.assertIn("under_construction", result.reasons)
         self.assertGreaterEqual(result.score, config.weight_under_construction)
 
+    def test_scores_client_4xx_uses_configured_weight(self) -> None:
+        config = ScoringConfig(weight_client_error=31)
+        html = BASE_HTML.replace(
+            '<meta name="viewport" content="width=device-width, initial-scale=1">',
+            '<meta name="description" content="Example business site"><meta name="viewport" content="width=device-width, initial-scale=1">',
+        )
+        response = _Response(status_code=429, text=html)
+        result = evaluate_website("https://example.com", config=config, response=response)
+        self.assertIn("client_error_429", result.reasons)
+        self.assertEqual(result.score, config.weight_client_error)
+
+    def test_scores_403_404_uses_configured_weight(self) -> None:
+        config = ScoringConfig(weight_not_found_or_forbidden=47)
+        html = BASE_HTML.replace(
+            '<meta name="viewport" content="width=device-width, initial-scale=1">',
+            '<meta name="description" content="Example business site"><meta name="viewport" content="width=device-width, initial-scale=1">',
+        )
+        response = _Response(status_code=404, text=html)
+        result = evaluate_website("https://example.com", config=config, response=response)
+        self.assertIn("http_404", result.reasons)
+        self.assertEqual(result.score, config.weight_not_found_or_forbidden)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -82,6 +82,7 @@ class RunContext:
             "queries_succeeded": 0,
             "businesses_found": 0,
             "websites_checked": 0,
+            "qualifying_leads": 0,
             "leads_exported": 0,
             "emails_sent": 0,
             "manual_review_leads": 0,

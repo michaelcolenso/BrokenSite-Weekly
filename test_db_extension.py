@@ -48,7 +48,7 @@ def test_database_extension():
                     print(f"✓ Table '{table}' created")
                 else:
                     print(f"✗ Table '{table}' missing")
-                    return False
+                    assert False, f"Expected table '{table}' to exist"
 
             # Check indexes
             indexes = conn.execute("""
@@ -68,7 +68,7 @@ def test_database_extension():
                     print(f"✓ Index '{index}' created")
                 else:
                     print(f"✗ Index '{index}' missing")
-                    return False
+                    assert False, f"Expected index '{index}' to exist"
 
         # Test audit methods
         print("\nTesting audit methods...")
@@ -149,7 +149,6 @@ def test_database_extension():
         print("\n" + "="*50)
         print("All tests passed! Database extension is working correctly.")
         print("="*50)
-        return True
 
     finally:
         # Clean up temp file
@@ -157,5 +156,5 @@ def test_database_extension():
             os.unlink(tmp_path)
 
 if __name__ == "__main__":
-    success = test_database_extension()
-    sys.exit(0 if success else 1)
+    test_database_extension()
+    sys.exit(0)

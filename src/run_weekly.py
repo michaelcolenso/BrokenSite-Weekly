@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import signal
 import argparse
+import json
 from datetime import datetime
 from typing import Optional
 from dataclasses import asdict
@@ -43,6 +44,90 @@ class GracefulShutdown:
 
     def check(self) -> bool:
         return self.shutdown_requested
+
+
+def _build_validation_requirements(
+    config: Config,
+    *,
+    skip_delivery: bool,
+    skip_outreach: bool,
+    dry_run: bool,
+) -> dict[str, bool]:
+    """Determine required configuration blocks for the current run mode."""
+    delivery_enabled = not skip_delivery
+    outreach_enabled = config.outreach.enabled and not skip_outreach
+
+    return {
+        "require_gumroad": delivery_enabled,
+        "require_smtp": delivery_enabled or (outreach_enabled and not dry_run),
+        "require_outreach": outreach_enabled,
+        "require_portal": False,
+    }
+
+
+def _emit_run_kpis(run_ctx: RunContext, *, dry_run: bool) -> None:
+    """Log and persist a baseline KPI snapshot for this run."""
+    now = datetime.utcnow()
+    duration_seconds = None
+    if run_ctx.start_time:
+        duration_seconds = int((now - run_ctx.start_time).total_seconds())
+
+    attempted = run_ctx.stats["queries_attempted"]
+    succeeded = run_ctx.stats["queries_succeeded"]
+    checked = run_ctx.stats["websites_checked"]
+    qualifying = run_ctx.stats["qualifying_leads"]
+
+    query_success_rate = round((succeeded / attempted) * 100, 2) if attempted else 0.0
+    qualification_rate = round((qualifying / checked) * 100, 2) if checked else 0.0
+
+    snapshot = {
+        "run_id": run_ctx.run_id,
+        "captured_at": f"{now.isoformat()}Z",
+        "duration_seconds": duration_seconds,
+        "kpis": {
+            "queries_attempted": attempted,
+            "queries_succeeded": succeeded,
+            "query_success_rate_pct": query_success_rate,
+            "businesses_found": run_ctx.stats["businesses_found"],
+            "websites_checked": checked,
+            "qualifying_leads": qualifying,
+            "qualification_rate_pct": qualification_rate,
+            "leads_exported": run_ctx.stats["leads_exported"],
+            "emails_sent": run_ctx.stats["emails_sent"],
+            "audits_generated": run_ctx.stats["audits_generated"],
+            "contacts_found": run_ctx.stats["contacts_found"],
+            "outreach_sent": run_ctx.stats["outreach_sent"],
+            "followups_sent": run_ctx.stats["followups_sent"],
+            "errors": run_ctx.stats["errors"],
+        },
+    }
+
+    logger.info(
+        "KPI baseline | run_id=%s duration_s=%s query_success=%.2f%% qualification=%.2f%% "
+        "qualified=%s exported=%s emails=%s errors=%s",
+        run_ctx.run_id,
+        duration_seconds,
+        query_success_rate,
+        qualification_rate,
+        qualifying,
+        run_ctx.stats["leads_exported"],
+        run_ctx.stats["emails_sent"],
+        run_ctx.stats["errors"],
+    )
+
+    if dry_run:
+        return
+
+    try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        run_snapshot = OUTPUT_DIR / f"kpi_baseline_{run_ctx.run_id}.json"
+        latest_snapshot = OUTPUT_DIR / "kpi_baseline_latest.json"
+        payload = json.dumps(snapshot, indent=2, sort_keys=True)
+        run_snapshot.write_text(payload, encoding="utf-8")
+        latest_snapshot.write_text(payload, encoding="utf-8")
+        logger.info(f"Saved KPI baseline snapshot: {run_snapshot}")
+    except Exception as e:
+        logger.warning(f"Failed to save KPI baseline snapshot: {e}")
 
 
 def process_business(
@@ -84,9 +169,13 @@ def process_business(
                 lead_tier=compute_lead_tier(config.scoring.weight_no_website),
             )
             if not dry_run:
-                db.upsert_lead(lead)
+                is_new = db.upsert_lead(lead)
+                if not is_new:
+                    logger.debug(f"Skipping {business.name}: duplicate within window")
+                    return None
 
             if lead.score >= config.scoring.min_score_to_include:
+                run_ctx.increment("qualifying_leads")
                 logger.info(
                     f"Lead: {business.name} | no website | "
                     f"Score: {lead.score} | Reasons: {','.join(lead.reasons)}"
@@ -151,6 +240,7 @@ def process_business(
                 return None
 
         if result.score >= config.scoring.min_score_to_include:
+            run_ctx.increment("qualifying_leads")
             logger.info(
                 f"Lead: {business.name} | {business.website} | "
                 f"Score: {result.score} | Reasons: {','.join(result.reasons)}"
@@ -675,8 +765,14 @@ def run_weekly(
         config = load_config()
 
     # Validate configuration
-    errors = validate_config(config)
-    if errors and not skip_delivery:
+    validation_requirements = _build_validation_requirements(
+        config,
+        skip_delivery=skip_delivery,
+        skip_outreach=skip_outreach,
+        dry_run=dry_run,
+    )
+    errors = validate_config(config, **validation_requirements)
+    if errors:
         for error in errors:
             logger.error(f"Config error: {error}")
         logger.error("Cannot proceed with invalid configuration")
@@ -705,6 +801,7 @@ def run_weekly(
 
                 if shutdown.check():
                     logger.warning("Shutdown during scrape phase")
+                    _emit_run_kpis(run_ctx, dry_run=dry_run)
                     if not dry_run:
                         db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
@@ -749,6 +846,7 @@ def run_weekly(
 
                 if shutdown.check():
                     logger.warning("Shutdown during audit phase")
+                    _emit_run_kpis(run_ctx, dry_run=dry_run)
                     if not dry_run:
                         db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
@@ -763,6 +861,7 @@ def run_weekly(
 
                 if shutdown.check():
                     logger.warning("Shutdown during contact phase")
+                    _emit_run_kpis(run_ctx, dry_run=dry_run)
                     if not dry_run:
                         db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
@@ -783,6 +882,8 @@ def run_weekly(
                 duration = run_ctx.end_phase("warm_delivery")
                 logger.info("Phase 'warm_delivery' completed in %.2fs", duration)
 
+            _emit_run_kpis(run_ctx, dry_run=dry_run)
+
             # Complete run (skip in dry-run)
             if not dry_run:
                 db.complete_run(run_ctx.run_id, run_ctx.stats)
@@ -794,6 +895,7 @@ def run_weekly(
 
         except Exception as e:
             logger.exception(f"Fatal error in weekly run: {e}")
+            _emit_run_kpis(run_ctx, dry_run=dry_run)
             if not dry_run:
                 db.complete_run(run_ctx.run_id, run_ctx.stats, str(e))
             raise
@@ -835,7 +937,7 @@ Examples:
     parser.add_argument(
         "--validate",
         action="store_true",
-        help="Validate configuration and exit",
+        help="Validate configuration for the selected run mode and exit",
     )
     parser.add_argument(
         "--outreach-only",
@@ -870,6 +972,7 @@ Examples:
         print(f"  Total leads: {stats['total_leads']}")
         print(f"  Unique websites: {stats['unique_websites']}")
         print(f"  Total runs: {stats['total_runs']}")
+        print(f"  Total exports: {stats['total_exports']}")
         if stats['last_run']:
             print(f"  Last run: {stats['last_run']['run_id']} ({stats['last_run']['status']})")
 
@@ -884,10 +987,41 @@ Examples:
                     f"{combo['quality_lead_count']} quality (score>=60), "
                     f"avg score {combo['avg_score']}"
                 )
+
+        if stats.get("last_completed_run"):
+            last_completed = stats["last_completed_run"]
+            completed_at = last_completed.get("completed_at")
+            completed_dt = completed_at
+            if isinstance(completed_at, str):
+                try:
+                    completed_dt = datetime.fromisoformat(completed_at)
+                except ValueError:
+                    completed_dt = None
+            if completed_dt:
+                now = datetime.now(completed_dt.tzinfo) if getattr(completed_dt, "tzinfo", None) else datetime.now()
+                days_since = (now - completed_dt).days
+                print(
+                    "  Last completed run: "
+                    f"{last_completed['run_id']} ({days_since} days ago) | "
+                    f"queries={last_completed['queries_attempted']} "
+                    f"businesses={last_completed['businesses_found']} "
+                    f"exported={last_completed['leads_exported']} "
+                    f"emails={last_completed['emails_sent']}"
+                )
+                if days_since > 8:
+                    print("  WARNING: Last completed run is older than 8 days.")
         return
 
     if args.validate:
-        errors = validate_config(config)
+        skip_delivery = args.scrape_only or args.outreach_only or args.export_csv
+        skip_outreach = args.no_outreach or args.export_csv
+        requirements = _build_validation_requirements(
+            config,
+            skip_delivery=skip_delivery,
+            skip_outreach=skip_outreach,
+            dry_run=args.dry_run,
+        )
+        errors = validate_config(config, **requirements)
         if errors:
             print("Configuration errors:")
             for error in errors:
