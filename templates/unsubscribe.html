@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Unsubscribed{% endblock %}
+
+{% block content %}
+<div class="card text-center">
+  <div class="section">
+    <h1 style="margin-bottom: 12px;">You're unsubscribed</h1>
+    <p class="text-muted" style="max-width: 440px; margin: 0 auto 24px;">
+      We've removed you from our list. You won't receive any more website checkup reports from us.
+    </p>
+    <p class="text-small text-muted" style="margin-bottom: 0;">
+      Changed your mind? Contact us at <a href="mailto:{{ from_email }}">{{ from_email }}</a>.
+    </p>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}Get Help — {{ business_name|default('Website Help') }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="section">
+    <div class="label">Website Checkup Follow-Up</div>
+    <h1 style="margin-bottom: 8px;">Let's fix these issues</h1>
+    <p class="text-muted">
+      Tell us a bit about your business and we'll connect you with a web professional who works with local companies. No cost for the intro.
+    </p>
+  </div>
+
+  <div class="section" style="padding-top: 0;">
+    <form method="post" action="{{ action_url }}">
+      <div class="form-group">
+        <label for="name">Your name</label>
+        <input type="text" id="name" name="name" required placeholder="Jane Smith" />
+      </div>
+
+      <div class="form-group">
+        <label for="email">Email address</label>
+        <input type="email" id="email" name="email" required placeholder="you@business.com" />
+        <p class="form-hint">We'll use this to send next steps. No spam.</p>
+      </div>
+
+      <div class="form-group">
+        <label for="phone">Phone <span class="text-muted" style="font-weight: 400;">(optional)</span></label>
+        <input type="tel" id="phone" name="phone" placeholder="(555) 123-4567" />
+      </div>
+
+      <div class="form-group">
+        <label for="notes">Anything else we should know? <span class="text-muted" style="font-weight: 400;">(optional)</span></label>
+        <textarea id="notes" name="notes" rows="4" placeholder="Best time to call, current web person, etc."></textarea>
+      </div>
+
+      <button type="submit" class="btn" style="width: 100%;">Send my request</button>
+      <p class="text-small text-muted text-center" style="margin-top: 12px; margin-bottom: 0;">
+        You can also forward your checkup report to whoever manages your website.
+      </p>
+    </form>
+  </div>
+</div>
+{% endblock %}

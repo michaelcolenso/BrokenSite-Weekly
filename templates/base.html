@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="BrokenSite Weekly" />
+  {% block meta %}{% endblock %}
+  <title>{% block title %}BrokenSite Weekly{% endblock %}</title>
+  <style>
+    :root {
+      --color-navy: #0f172a;
+      --color-slate: #334155;
+      --color-muted: #64748b;
+      --color-cream: #f8fafc;
+      --color-white: #ffffff;
+      --color-coral: #dc4c3a;
+      --color-coral-hover: #b93a2b;
+      --color-amber: #d97706;
+      --color-gold: #ca8a04;
+      --color-border: #e2e8f0;
+      --color-critical-bg: #fef2f2;
+      --color-critical-border: #fecaca;
+      --color-high-bg: #fffbeb;
+      --color-high-border: #fde68a;
+      --color-medium-bg: #fefce8;
+      --color-medium-border: #fef08a;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --radius: 10px;
+      --shadow-sm: 0 1px 2px 0 rgba(0,0,0,0.04);
+      --shadow: 0 4px 6px -1px rgba(0,0,0,0.06), 0 2px 4px -1px rgba(0,0,0,0.03);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-navy: #f1f5f9;
+        --color-slate: #cbd5e0;
+        --color-muted: #94a3b8;
+        --color-cream: #0f172a;
+        --color-white: #1e293b;
+        --color-border: #334155;
+        --color-critical-bg: #450a0a;
+        --color-critical-border: #7f1d1d;
+        --color-high-bg: #451a03;
+        --color-high-border: #92400e;
+        --color-medium-bg: #422006;
+        --color-medium-border: #a16207;
+      }
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      color: var(--color-slate);
+      background: var(--color-cream);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .site-header {
+      background: var(--color-white);
+      border-bottom: 1px solid var(--color-border);
+      padding: 16px 24px;
+    }
+    .site-header-inner {
+      max-width: 720px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 16px;
+      color: var(--color-navy);
+    }
+    .site-header-inner svg {
+      flex-shrink: 0;
+    }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .card {
+      background: var(--color-white);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border: 1px solid var(--color-border);
+      overflow: hidden;
+    }
+
+    .section {
+      padding: 32px;
+    }
+    .section + .section {
+      border-top: 1px solid var(--color-border);
+    }
+
+    h1, h2, h3 {
+      color: var(--color-navy);
+      line-height: 1.25;
+      letter-spacing: -0.01em;
+    }
+    h1 { font-size: 28px; font-weight: 800; }
+    h2 { font-size: 22px; font-weight: 700; }
+    h3 { font-size: 18px; font-weight: 600; }
+
+    p { margin-bottom: 16px; }
+    p:last-child { margin-bottom: 0; }
+
+    a { color: var(--color-coral); text-decoration: underline; text-underline-offset: 2px; }
+    a:hover { text-decoration: none; }
+
+    .btn {
+      display: inline-block;
+      background: var(--color-coral);
+      color: #fff;
+      padding: 14px 28px;
+      border-radius: var(--radius);
+      font-size: 16px;
+      font-weight: 600;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.05s ease;
+    }
+    .btn:hover { background: var(--color-coral-hover); text-decoration: none; }
+    .btn:active { transform: translateY(1px); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--color-slate);
+      border: 1px solid var(--color-border);
+    }
+    .btn-secondary:hover { background: var(--color-cream); }
+
+    .label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--color-muted);
+      margin-bottom: 6px;
+    }
+
+    .text-center { text-align: center; }
+    .text-muted { color: var(--color-muted); }
+    .text-small { font-size: 14px; }
+
+    .mt-1 { margin-top: 8px; }
+    .mt-2 { margin-top: 16px; }
+    .mt-3 { margin-top: 24px; }
+    .mt-4 { margin-top: 32px; }
+    .mb-0 { margin-bottom: 0; }
+    .mb-1 { margin-bottom: 8px; }
+    .mb-2 { margin-bottom: 16px; }
+    .mb-3 { margin-bottom: 24px; }
+
+    .form-group { margin-bottom: 20px; }
+    .form-group label {
+      display: block;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-navy);
+      margin-bottom: 6px;
+    }
+    .form-group input,
+    .form-group textarea {
+      width: 100%;
+      padding: 10px 12px;
+      font-size: 15px;
+      font-family: inherit;
+      color: var(--color-navy);
+      background: var(--color-white);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      outline: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .form-group input:focus,
+    .form-group textarea:focus {
+      border-color: var(--color-coral);
+      box-shadow: 0 0 0 3px rgba(220, 76, 58, 0.12);
+    }
+    .form-hint {
+      font-size: 13px;
+      color: var(--color-muted);
+      margin-top: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px;
+      border-bottom: 1px solid var(--color-border);
+    }
+    th {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--color-muted);
+    }
+    tr:last-child td { border-bottom: none; }
+
+    .empty-state {
+      padding: 40px 24px;
+      text-align: center;
+      color: var(--color-muted);
+    }
+
+    .footer {
+      padding: 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--color-muted);
+    }
+
+    @media (max-width: 640px) {
+      .container { padding: 16px; }
+      .section { padding: 24px; }
+      h1 { font-size: 24px; }
+      h2 { font-size: 20px; }
+    }
+  </style>
+</head>
+<body>
+  {% block header %}
+  <header class="site-header">
+    <div class="site-header-inner">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      BrokenSite Weekly
+    </div>
+  </header>
+  {% endblock %}
+
+  <div class="container">
+    {% block content %}{% endblock %}
+  </div>
+
+  {% block footer %}
+  <div class="footer">
+    <p>Powered by BrokenSite Weekly</p>
+  </div>
+  {% endblock %}
+</body>
+</html>

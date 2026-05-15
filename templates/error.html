@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title|default('Error') }}{% endblock %}
+
+{% block content %}
+<div class="card text-center">
+  <div class="section">
+    <div style="
+      width: 56px; height: 56px; border-radius: 50%;
+      background: var(--color-critical-bg);
+      color: var(--color-coral);
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 20px;
+      font-size: 24px; font-weight: 700;
+    " aria-hidden="true">!</div>
+
+    <h1 style="margin-bottom: 12px;">{{ title|default('Something went wrong') }}</h1>
+    <p class="text-muted" style="max-width: 440px; margin: 0 auto 24px;">
+      {{ message|default('We couldn't find what you were looking for. The link may have expired or the page may have moved.') }}
+    </p>
+    <p class="text-small text-muted" style="margin-bottom: 0;">
+      Need help? Contact us at <a href="mailto:{{ from_email }}">{{ from_email }}</a>.
+    </p>
+  </div>
+</div>
+{% endblock %}

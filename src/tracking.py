@@ -12,8 +12,9 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
-from .config import OUTPUT_DIR, load_config
+from .config import OUTPUT_DIR, PROJECT_ROOT, load_config
 from .db import Database
 from .gumroad import get_subscribers_with_isolation
 from .delivery import send_email
@@ -25,6 +26,37 @@ logger = get_logger("tracking")
 app = FastAPI(title="BrokenSite Tracking", docs_url=None, redoc_url=None)
 
 AUDITS_DIR = OUTPUT_DIR / "audits"
+TEMPLATES_DIR = PROJECT_ROOT / "templates"
+
+# Jinja2 template environment
+_jinja_env = None
+
+
+def _get_jinja_env() -> Environment:
+    """Get or create Jinja2 environment."""
+    global _jinja_env
+    if _jinja_env is None:
+        _jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
+    return _jinja_env
+
+
+def _render_template(name: str, **context) -> str:
+    """Render a Jinja2 template by name."""
+    try:
+        template = _get_jinja_env().get_template(name)
+        return template.render(**context)
+    except TemplateNotFound:
+        logger.error(f"Template not found: {name}")
+        raise
+
+
+def _render_error_page(title: str, message: str, from_email: str, status_code: int = 400) -> HTMLResponse:
+    """Return a branded error page."""
+    try:
+        html = _render_template("error.html", title=title, message=message, from_email=from_email)
+    except Exception:
+        html = f"<!doctype html><html><body><h1>{title}</h1><p>{message}</p></body></html>"
+    return HTMLResponse(content=html, status_code=status_code)
 
 # 1x1 transparent GIF
 TRACKING_PIXEL = (
@@ -103,51 +135,22 @@ Notes: {notes}
         logger.error(f"Failed to send inquiry notifications: {e}")
 
 
-def _render_portal_page(email: str, exports: list[dict], warm_export: dict | None, token: str) -> str:
-    items = []
+def _build_portal_exports(exports: list[dict], token: str) -> list[dict]:
+    """Build export list with rendered links for the portal template."""
+    result = []
     for exp in exports:
         csv_path = exp.get("csv_path") or ""
         filename = Path(csv_path).name if csv_path else ""
         link = f"/portal/download/{filename}?token={token}" if filename else ""
-        items.append(f"""
-        <tr>
-          <td>{exp.get('sent_at','')}</td>
-          <td>{exp.get('export_type','')}</td>
-          <td>{exp.get('tier','')}</td>
-          <td>{exp.get('lead_count','')}</td>
-          <td><a href="{link}">{filename or 'n/a'}</a></td>
-        </tr>
-        """)
-    warm_count = warm_export.get("lead_count") if warm_export else 0
-    return f"""<!DOCTYPE html>
-<html>
-<head>
-  <title>BrokenSite Weekly Portal</title>
-  <style>
-    body {{ font-family: -apple-system, sans-serif; background: #f7fafc; color: #2d3748; padding: 40px; }}
-    .card {{ background: white; border-radius: 12px; padding: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
-    th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #e2e8f0; }}
-    th {{ font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #718096; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Subscriber Portal</h1>
-    <p>Signed in as <strong>{email}</strong></p>
-    <p>Most recent warm lead batch: <strong>{warm_count}</strong> leads</p>
-    <h2>Recent Exports</h2>
-    <table>
-      <thead>
-        <tr><th>Date</th><th>Type</th><th>Tier</th><th>Leads</th><th>Download</th></tr>
-      </thead>
-      <tbody>
-        {''.join(items) if items else '<tr><td colspan="5">No exports yet</td></tr>'}
-      </tbody>
-    </table>
-  </div>
-</body>
-</html>"""
+        result.append({
+            "sent_at": exp.get("sent_at", ""),
+            "export_type": exp.get("export_type", ""),
+            "tier": exp.get("tier", ""),
+            "lead_count": exp.get("lead_count", ""),
+            "filename": filename or "n/a",
+            "link": link,
+        })
+    return result
 
 
 @app.get("/track/{place_id}/open.gif")
@@ -172,8 +175,11 @@ async def view_audit(place_id: str, request: Request):
             audit_path, media_type="text/html", headers={"Cache-Control": "no-cache"}
         )
 
-    return HTMLResponse(
-        content="<h1>Report not found</h1><p>This report is no longer available.</p>",
+    config = load_config()
+    return _render_error_page(
+        title="Report not found",
+        message="This checkup report is no longer available. It may have expired or been removed.",
+        from_email=config.smtp.from_email,
         status_code=404,
     )
 
@@ -181,40 +187,16 @@ async def view_audit(place_id: str, request: Request):
 @app.get("/track/{place_id}/cta")
 async def track_cta_form(place_id: str, request: Request):
     """Show CTA form and track view."""
-    return HTMLResponse(
-        content=f"""<!DOCTYPE html>
-<html>
-<head><title>Get Help</title>
-<style>
-body {{ font-family: -apple-system, sans-serif; display: flex; justify-content: center;
-       align-items: center; min-height: 100vh; background: #f7fafc; color: #2d3748; }}
-.card {{ background: white; padding: 32px; border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.07); max-width: 520px; width: 100%; }}
-label {{ display: block; margin-top: 12px; font-weight: 600; }}
-input, textarea {{ width: 100%; padding: 10px; margin-top: 6px; border: 1px solid #e2e8f0; border-radius: 6px; }}
-button {{ margin-top: 16px; background: #667eea; color: white; border: none; padding: 12px 20px; border-radius: 6px; font-weight: 600; }}
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>Let’s Fix These Issues</h1>
-  <p>Leave your details and we’ll reach out with next steps.</p>
-  <form method="post" action="/track/{place_id}/cta">
-    <label>Name</label>
-    <input name="name" type="text" required />
-    <label>Email</label>
-    <input name="email" type="email" required />
-    <label>Phone</label>
-    <input name="phone" type="text" />
-    <label>Notes</label>
-    <textarea name="notes" rows="4"></textarea>
-    <button type="submit">Request Help</button>
-  </form>
-</div>
-</body>
-</html>""",
-        status_code=200,
+    db = _get_db()
+    lead = db.get_lead_summary(place_id)
+    business_name = lead.get("name") if lead else ""
+
+    html = _render_template(
+        "cta_form.html",
+        business_name=business_name,
+        action_url=f"/track/{place_id}/cta",
     )
+    return HTMLResponse(content=html, status_code=200)
 
 
 @app.post("/track/{place_id}/cta")
@@ -235,29 +217,8 @@ async def track_cta_submit(
     except Exception as e:
         logger.error(f"Failed to record CTA inquiry: {e}")
 
-    return HTMLResponse(
-        content="""<!DOCTYPE html>
-<html>
-<head><title>Thank You</title>
-<style>
-body { font-family: -apple-system, sans-serif; display: flex; justify-content: center;
-       align-items: center; min-height: 100vh; background: #f7fafc; color: #2d3748; }
-.card { background: white; padding: 40px; border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.07); text-align: center; max-width: 500px; }
-h1 { color: #667eea; margin-bottom: 20px; }
-</style>
-</head>
-<body>
-<div class="card">
-<h1>Thank You!</h1>
-<p>We received your request. A web professional will be in touch shortly.</p>
-<p style="margin-top:20px;color:#718096;font-size:14px;">
-You can close this page.</p>
-</div>
-</body>
-</html>""",
-        status_code=200,
-    )
+    html = _render_template("thank_you.html")
+    return HTMLResponse(content=html, status_code=200)
 
 
 @app.get("/unsubscribe/{place_id}")
@@ -275,27 +236,9 @@ async def unsubscribe(place_id: str, request: Request):
     except Exception as e:
         logger.error(f"Error processing unsubscribe for {place_id}: {e}")
 
-    return HTMLResponse(
-        content="""<!DOCTYPE html>
-<html>
-<head><title>Unsubscribed</title>
-<style>
-body { font-family: -apple-system, sans-serif; display: flex; justify-content: center;
-       align-items: center; min-height: 100vh; background: #f7fafc; color: #2d3748; }
-.card { background: white; padding: 40px; border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.07); text-align: center; max-width: 500px; }
-h1 { margin-bottom: 20px; }
-</style>
-</head>
-<body>
-<div class="card">
-<h1>Unsubscribed</h1>
-<p>You've been removed from our list. We won't contact you again.</p>
-</div>
-</body>
-</html>""",
-        status_code=200,
-    )
+    config = load_config()
+    html = _render_template("unsubscribe.html", from_email=config.smtp.from_email)
+    return HTMLResponse(content=html, status_code=200)
 
 
 @app.get("/portal")
@@ -303,16 +246,33 @@ async def portal(token: str = ""):
     """Subscriber portal with token auth."""
     config = load_config()
     if not config.portal.secret:
-        return HTMLResponse(content="Portal not configured.", status_code=403)
+        return _render_error_page(
+            title="Portal not configured",
+            message="The subscriber portal is not set up yet. Please contact support.",
+            from_email=config.smtp.from_email,
+            status_code=403,
+        )
     verified = verify_portal_token(token, config.portal.secret)
     if not verified:
-        return HTMLResponse(content="Invalid or expired token.", status_code=403)
+        return _render_error_page(
+            title="Link expired",
+            message="This portal link is invalid or has expired. Please request a new one.",
+            from_email=config.smtp.from_email,
+            status_code=403,
+        )
 
     email, _ = verified
     db = _get_db()
     exports = db.get_recent_exports(email, limit=4)
     warm_export = db.get_latest_warm_export(email)
-    html = _render_portal_page(email, exports, warm_export, token)
+    warm_count = warm_export.get("lead_count") if warm_export else None
+    export_items = _build_portal_exports(exports, token)
+    html = _render_template(
+        "portal.html",
+        email=email,
+        exports=export_items,
+        warm_count=warm_count,
+    )
     return HTMLResponse(content=html, status_code=200)
 
 
@@ -321,16 +281,36 @@ async def portal_download(filename: str, token: str = ""):
     """Download export CSV with token auth."""
     config = load_config()
     if not config.portal.secret:
-        return HTMLResponse(content="Portal not configured.", status_code=403)
+        return _render_error_page(
+            title="Portal not configured",
+            message="The subscriber portal is not set up yet. Please contact support.",
+            from_email=config.smtp.from_email,
+            status_code=403,
+        )
     verified = verify_portal_token(token, config.portal.secret)
     if not verified:
-        return HTMLResponse(content="Invalid or expired token.", status_code=403)
+        return _render_error_page(
+            title="Link expired",
+            message="This portal link is invalid or has expired. Please request a new one.",
+            from_email=config.smtp.from_email,
+            status_code=403,
+        )
 
     requested = (OUTPUT_DIR / filename).resolve()
     if not str(requested).startswith(str(OUTPUT_DIR.resolve())):
-        return HTMLResponse(content="Invalid file path.", status_code=400)
+        return _render_error_page(
+            title="Invalid request",
+            message="The file path you requested is not allowed.",
+            from_email=config.smtp.from_email,
+            status_code=400,
+        )
     if not requested.exists():
-        return HTMLResponse(content="File not found.", status_code=404)
+        return _render_error_page(
+            title="File not found",
+            message="The file you requested no longer exists or may have been moved.",
+            from_email=config.smtp.from_email,
+            status_code=404,
+        )
     return FileResponse(requested, media_type="text/csv")
 
 

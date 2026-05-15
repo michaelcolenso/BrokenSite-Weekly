@@ -98,14 +98,14 @@ class TestGenerateAuditHtml:
         # Set up templates dir
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir()
-        # Copy the template
-        template_src = Path(__file__).parent.parent / "templates" / "audit.html"
-        if template_src.exists():
-            (templates_dir / "audit.html").write_text(
-                template_src.read_text(), encoding="utf-8"
-            )
-        else:
-            pytest.skip("Template file not found")
+        # Copy templates (audit.html extends base.html)
+        templates_src = Path(__file__).parent.parent / "templates"
+        for name in ("audit.html", "base.html"):
+            src = templates_src / name
+            if src.exists():
+                (templates_dir / name).write_text(src.read_text(), encoding="utf-8")
+            else:
+                pytest.skip(f"Template file {name} not found")
 
         lead = {
             "place_id": "test123",
