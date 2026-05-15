@@ -61,11 +61,6 @@ def process_business(
         dry_run: If True, skip database writes (scoring still happens).
     """
     try:
-        # Check for duplicate (skip in dry-run to show what would be processed)
-        if not dry_run and db.is_duplicate(business.place_id, business.website):
-            logger.debug(f"Skipping {business.name}: duplicate")
-            return None
-
         # Handle no-website leads (optional)
         if not business.website:
             if not config.scoring.include_no_website_leads:
@@ -83,7 +78,7 @@ def process_business(
                 city=business.city,
                 category=business.category,
                 score=config.scoring.weight_no_website,
-                reasons="no_website",
+                reasons=["no_website"],
                 first_seen=datetime.utcnow(),
                 last_seen=datetime.utcnow(),
                 lead_tier=compute_lead_tier(config.scoring.weight_no_website),
@@ -94,7 +89,7 @@ def process_business(
             if lead.score >= config.scoring.min_score_to_include:
                 logger.info(
                     f"Lead: {business.name} | no website | "
-                    f"Score: {lead.score} | Reasons: {lead.reasons}"
+                    f"Score: {lead.score} | Reasons: {','.join(lead.reasons)}"
                 )
                 return lead
 
@@ -110,8 +105,9 @@ def process_business(
             config=config.scoring,
             retry_config=config.retry,
         )
+        run_ctx.count_reasons(result.reasons)
 
-        reasons_str = ",".join(result.reasons)
+        reasons_list = list(result.reasons)
         lead_tier = compute_lead_tier(result.score)
         exclusive_until = None
         exclusive_tier = None
@@ -137,7 +133,7 @@ def process_business(
             city=business.city,
             category=business.category,
             score=result.score,
-            reasons=reasons_str,
+            reasons=reasons_list,
             first_seen=datetime.utcnow(),
             last_seen=datetime.utcnow(),
             exclusive_until=exclusive_until,
@@ -157,7 +153,7 @@ def process_business(
         if result.score >= config.scoring.min_score_to_include:
             logger.info(
                 f"Lead: {business.name} | {business.website} | "
-                f"Score: {result.score} | Reasons: {result.reasons}"
+                f"Score: {result.score} | Reasons: {','.join(result.reasons)}"
             )
             return lead
         else:
@@ -224,6 +220,22 @@ def run_scraping_phase(
                 lead = process_business(business, db, config, run_ctx, dry_run=dry_run)
                 if lead:
                     qualifying_leads.append(lead)
+
+    duration = run_ctx.stats.get("phase_durations_seconds", {}).get("scraping", 0.0)
+    websites_checked = run_ctx.stats.get("websites_checked", 0)
+    if duration > 0 and websites_checked:
+        rate = websites_checked / (duration / 60)
+        logger.info(
+            "Scraping throughput: %.2f websites/minute (%s checked in %.2fs)",
+            rate,
+            websites_checked,
+            duration,
+        )
+
+    reason_counts = run_ctx.stats.get("reason_counts", {})
+    if reason_counts:
+        top_reasons = sorted(reason_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+        logger.info("Top scoring reasons this run: %s", top_reasons)
 
     return qualifying_leads
 
@@ -531,7 +543,8 @@ def run_outreach_phase(
         return 0
 
     leads = db.get_leads_ready_for_outreach(
-        min_score=config.outreach.min_score_for_outreach
+        min_score=config.outreach.min_score_for_outreach,
+        min_confidence=config.outreach.min_contact_confidence,
     )
     if leads:
         logger.info(f"Found {len(leads)} leads ready for outreach")
@@ -683,9 +696,12 @@ def run_weekly(
             # Phase 1: Scraping
             if not skip_scrape:
                 logger.info("=== Phase 1: Scraping ===")
+                run_ctx.start_phase("scraping")
                 scraped_qualifying_leads = run_scraping_phase(
                     config, db, run_ctx, shutdown, dry_run=dry_run
                 )
+                duration = run_ctx.end_phase("scraping")
+                logger.info("Phase 'scraping' completed in %.2fs", duration)
 
                 if shutdown.check():
                     logger.warning("Shutdown during scrape phase")
@@ -696,6 +712,7 @@ def run_weekly(
             # Optional: Local CSV export (no emails, no export marking)
             if export_csv:
                 logger.info("=== Local CSV Export ===")
+                run_ctx.start_phase("export_csv")
                 run_export_csv_phase(
                     config=config,
                     db=db,
@@ -703,21 +720,32 @@ def run_weekly(
                     scraped_qualifying_leads=scraped_qualifying_leads,
                     label="local",
                 )
+                duration = run_ctx.end_phase("export_csv")
+                logger.info("Phase 'export_csv' completed in %.2fs", duration)
 
             # Phase 2: Delivery (cold leads CSV)
             if not skip_delivery:
                 logger.info("=== Phase 2: Delivery ===")
+                run_ctx.start_phase("delivery")
                 run_delivery_phase(config, db, run_ctx, dry_run=dry_run)
+                duration = run_ctx.end_phase("delivery")
+                logger.info("Phase 'delivery' completed in %.2fs", duration)
 
             # Phase 3: Manual review export (skip in dry-run)
             if config.scoring.manual_review_enabled and not dry_run:
                 logger.info("=== Phase 3: Manual Review Export ===")
+                run_ctx.start_phase("manual_review")
                 run_manual_review_phase(config, db, run_ctx)
+                duration = run_ctx.end_phase("manual_review")
+                logger.info("Phase 'manual_review' completed in %.2fs", duration)
 
             # Phase 4: Generate audit pages
             if not skip_outreach:
                 logger.info("=== Phase 4: Generate Audits ===")
+                run_ctx.start_phase("audit_generation")
                 run_audit_generation_phase(config, db, run_ctx, shutdown)
+                duration = run_ctx.end_phase("audit_generation")
+                logger.info("Phase 'audit_generation' completed in %.2fs", duration)
 
                 if shutdown.check():
                     logger.warning("Shutdown during audit phase")
@@ -728,7 +756,10 @@ def run_weekly(
             # Phase 5: Find contacts
             if not skip_outreach:
                 logger.info("=== Phase 5: Find Contacts ===")
+                run_ctx.start_phase("contact_finding")
                 run_contact_finding_phase(config, db, run_ctx, shutdown)
+                duration = run_ctx.end_phase("contact_finding")
+                logger.info("Phase 'contact_finding' completed in %.2fs", duration)
 
                 if shutdown.check():
                     logger.warning("Shutdown during contact phase")
@@ -739,12 +770,18 @@ def run_weekly(
             # Phase 6: Send outreach
             if not skip_outreach:
                 logger.info("=== Phase 6: Send Outreach ===")
+                run_ctx.start_phase("outreach")
                 run_outreach_phase(config, db, run_ctx, shutdown, dry_run=dry_run)
+                duration = run_ctx.end_phase("outreach")
+                logger.info("Phase 'outreach' completed in %.2fs", duration)
 
             # Phase 7: Deliver warm leads
             if not skip_outreach and not skip_delivery:
                 logger.info("=== Phase 7: Deliver Warm Leads ===")
+                run_ctx.start_phase("warm_delivery")
                 run_warm_delivery_phase(config, db, run_ctx, dry_run=dry_run)
+                duration = run_ctx.end_phase("warm_delivery")
+                logger.info("Phase 'warm_delivery' completed in %.2fs", duration)
 
             # Complete run (skip in dry-run)
             if not dry_run:
@@ -835,6 +872,18 @@ Examples:
         print(f"  Total runs: {stats['total_runs']}")
         if stats['last_run']:
             print(f"  Last run: {stats['last_run']['run_id']} ({stats['last_run']['status']})")
+
+        top_combos = db.get_top_yield_city_categories(limit=5)
+        if top_combos:
+            print("  Top city/category yield (quality-first):")
+            for combo in top_combos:
+                print(
+                    "    - "
+                    f"{combo['city']} / {combo['category']}: "
+                    f"{combo['lead_count']} leads, "
+                    f"{combo['quality_lead_count']} quality (score>=60), "
+                    f"avg score {combo['avg_score']}"
+                )
         return
 
     if args.validate:

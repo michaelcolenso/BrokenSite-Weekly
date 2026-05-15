@@ -22,6 +22,17 @@ USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
+_SESSION: Optional[requests.Session] = None
+
+
+def _get_session() -> requests.Session:
+    global _SESSION
+    if _SESSION is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT})
+        _SESSION = session
+    return _SESSION
+
 # Domains/patterns that produce false positive emails
 FALSE_POSITIVE_PATTERNS = [
     r"@example\.com",
@@ -156,7 +167,9 @@ def _extract_via_regex(html: str) -> Optional[str]:
 
 
 def find_contact_email(
-    website_url: str, timeout: int = 10
+    website_url: str,
+    timeout: int = 10,
+    session: Optional[requests.Session] = None,
 ) -> Optional[ContactInfo]:
     """
     Attempt to find a contact email for the business.
@@ -171,10 +184,10 @@ def find_contact_email(
     """
     try:
         logger.debug(f"Finding contact for {website_url}")
-        response = requests.get(
+        session = session or _get_session()
+        response = session.get(
             website_url,
             timeout=timeout,
-            headers={"User-Agent": USER_AGENT},
             allow_redirects=True,
         )
         response.raise_for_status()
@@ -196,10 +209,9 @@ def find_contact_email(
         contact_url = _find_contact_page_url(soup, website_url)
         if contact_url:
             try:
-                contact_resp = requests.get(
+                contact_resp = session.get(
                     contact_url,
                     timeout=timeout,
-                    headers={"User-Agent": USER_AGENT},
                     allow_redirects=True,
                 )
                 contact_resp.raise_for_status()
@@ -238,11 +250,13 @@ def find_contact_email(
 
 
 def find_contact_with_isolation(
-    website_url: str, timeout: int = 10
+    website_url: str,
+    timeout: int = 10,
+    session: Optional[requests.Session] = None,
 ) -> tuple[Optional[ContactInfo], Optional[str]]:
     """Never raises - returns (contact_info, error_message)."""
     try:
-        result = find_contact_email(website_url, timeout)
+        result = find_contact_email(website_url, timeout, session=session)
         return result, None
     except Exception as e:
         logger.error(f"Contact finder isolation caught error for {website_url}: {e}")

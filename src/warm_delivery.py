@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from .config import Config, OUTPUT_DIR, SMTPConfig, PortalConfig
 from .delivery import create_email, send_email, _sanitize_csv_value
 from .portal_auth import generate_portal_token
-from .lead_utils import compute_lead_tier, has_marketing_pixel, suggested_pitch_from_reasons
+from .lead_utils import compute_lead_tier, has_marketing_pixel, suggested_pitch_from_reasons, parse_reasons
 from .logging_setup import get_logger
 
 logger = get_logger("warm_delivery")
@@ -64,6 +64,7 @@ def generate_warm_lead_csv(
 
     for lead in warm_leads:
         reasons = lead.get("reasons", "")
+        reasons_list = parse_reasons(reasons)
         writer.writerow([
             _sanitize_csv_value(lead.get("name", "")),
             _sanitize_csv_value(lead.get("website", "")),
@@ -76,7 +77,7 @@ def generate_warm_lead_csv(
             lead.get("engagement_score", 0),
             _sanitize_csv_value(lead.get("email", "")),
             _sanitize_csv_value(lead.get("audit_url", "")),
-            _sanitize_csv_value(reasons),
+            _sanitize_csv_value(",".join(reasons_list)),
             lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0)),
             suggested_pitch_from_reasons(reasons),
             "yes" if has_marketing_pixel(reasons) else "no",

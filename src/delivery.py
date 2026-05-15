@@ -20,7 +20,7 @@ from .config import SMTPConfig, RetryConfig, OUTPUT_DIR, PortalConfig
 from .retry import retry_with_backoff
 from .gumroad import Subscriber
 from .portal_auth import generate_portal_token
-from .lead_utils import compute_lead_tier, has_marketing_pixel, suggested_pitch_from_reasons
+from .lead_utils import compute_lead_tier, has_marketing_pixel, suggested_pitch_from_reasons, parse_reasons
 from .logging_setup import get_logger
 
 logger = get_logger("delivery")
@@ -87,6 +87,7 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
     for lead in leads:
         # Ensure all fields exist
         reasons = lead.get("reasons", "")
+        reasons_list = parse_reasons(reasons)
         row = {
             field: _sanitize_csv_value(lead.get(field, ""))
             for field in fieldnames
@@ -94,6 +95,7 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
         row["lead_tier"] = lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0))
         row["suggested_pitch"] = suggested_pitch_from_reasons(reasons)
         row["has_marketing_pixel"] = "yes" if has_marketing_pixel(reasons) else "no"
+        row["reasons"] = _sanitize_csv_value(",".join(reasons_list))
         writer.writerow(row)
 
     csv_content = buffer.getvalue()
