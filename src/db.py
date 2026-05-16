@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE INDEX IF NOT EXISTS idx_leads_website ON leads(website);
 CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads(last_seen);
 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);
+CREATE INDEX IF NOT EXISTS idx_leads_exported_pro_score ON leads(exported_pro_at, score);
+CREATE INDEX IF NOT EXISTS idx_leads_exported_basic_score ON leads(exported_basic_at, score);
 
 -- Run history: tracks each weekly run
 CREATE TABLE IF NOT EXISTS runs (
@@ -114,6 +116,8 @@ CREATE TABLE IF NOT EXISTS contacts (
     confidence REAL,
     found_at TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_contacts_confidence ON contacts(confidence);
 
 -- Outreach attempts to leads
 CREATE TABLE IF NOT EXISTS outreach (

@@ -24,6 +24,7 @@ class ScraperConfig:
     scroll_pause_ms: int = 1500
     max_scrolls: int = 15
     max_results_per_query: int = 50
+    max_workers: int = field(default_factory=lambda: int(os.environ.get("SCRAPER_MAX_WORKERS", "5")))
     screenshot_on_failure: bool = True
     html_dump_on_failure: bool = True
     user_agent: str = (

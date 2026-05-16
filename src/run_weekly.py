@@ -12,6 +12,7 @@ import sys
 import signal
 import argparse
 import json
+import concurrent.futures
 from datetime import datetime
 from typing import Optional
 from dataclasses import asdict
@@ -100,6 +101,8 @@ def _emit_run_kpis(run_ctx: RunContext, *, dry_run: bool) -> None:
             "followups_sent": run_ctx.stats["followups_sent"],
             "errors": run_ctx.stats["errors"],
         },
+        "phase_durations_seconds": run_ctx.stats.get("phase_durations_seconds", {}),
+        "reason_counts": run_ctx.stats.get("reason_counts", {}),
     }
 
     logger.info(
@@ -302,14 +305,23 @@ def run_scraping_phase(
             run_ctx.increment("queries_succeeded")
             run_ctx.increment("businesses_found", len(businesses))
 
-            # Process each business
-            for business in businesses:
-                if shutdown.check():
-                    break
-
-                lead = process_business(business, db, config, run_ctx, dry_run=dry_run)
-                if lead:
-                    qualifying_leads.append(lead)
+            # Process each business concurrently
+            max_workers = getattr(config.scraper, 'max_workers', 5)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(process_business, business, db, config, run_ctx, dry_run): business
+                    for business in businesses
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    if shutdown.check():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    try:
+                        lead = future.result()
+                        if lead:
+                            qualifying_leads.append(lead)
+                    except Exception as e:
+                        logger.error(f"Error processing business concurrently: {e}")
 
     duration = run_ctx.stats.get("phase_durations_seconds", {}).get("scraping", 0.0)
     websites_checked = run_ctx.stats.get("websites_checked", 0)
