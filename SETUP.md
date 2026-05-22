@@ -78,11 +78,12 @@ warm lead delivery, and portal links should be enabled only after the tracking
 service and tracking domain are deployed and outreach compliance fields are
 filled in.
 
-`.env.example` also keeps the weekly scrape grid bounded with
-`SEARCH_QUERIES_JSON` and `TARGET_CITIES_JSON`. Increase those JSON lists only
-after a scrape-only dry run fits the two-hour systemd timeout. The optional
-broken-image and dead-social scoring probes add outbound HEAD requests and stay
-off until they are measured.
+`.env.example` also keeps the weekly scrape budget bounded with
+`SEARCH_QUERIES_JSON`, `TARGET_CITIES_JSON`, and
+`SCRAPER_MAX_RESULTS_PER_QUERY`. Increase those values only after a scrape-only
+dry run fits the two-hour systemd timeout. The optional broken-image and
+dead-social scoring probes add outbound HEAD requests and stay off until they
+are measured.
 
 ### Getting Gumroad Credentials
 
