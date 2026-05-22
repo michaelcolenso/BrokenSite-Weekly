@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 from typing import Tuple, List, Optional, Dict, Any
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import requests
 from requests.exceptions import (
@@ -297,6 +297,125 @@ def _detect_marketing_signals(html: str) -> List[str]:
                 found.append(key)
                 break
     return found
+
+
+def _check_ssl_expiry(hostname: str, port: int = 443, timeout: int = 5) -> Optional[int]:
+    """
+    Check SSL certificate expiry for a hostname.
+    Returns days until expiry, or None if check fails.
+    """
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                cert = ssock.getpeercert()
+                if not cert:
+                    return None
+                expiry_str = cert.get("notAfter")
+                if not expiry_str:
+                    return None
+                expiry_date = ssl.cert_time_to_seconds(expiry_str)
+                expiry = datetime.fromtimestamp(expiry_date, tz=timezone.utc)
+                now = datetime.now(tz=timezone.utc)
+                return (expiry - now).days
+    except Exception:
+        return None
+
+
+_IMG_SRC_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+
+_A_HREF_RE = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.IGNORECASE)
+
+_PHONE_RE = re.compile(
+    r'(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})'
+)
+
+_EMAIL_RE = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
+
+
+def _normalize_phone(phone: str) -> str:
+    """Strip non-digits and remove leading US country code."""
+    digits = re.sub(r'\D', '', phone or '')
+    if len(digits) == 11 and digits.startswith('1'):
+        return digits[1:]
+    return digits
+
+
+def _extract_phone_numbers(html: str) -> List[str]:
+    """Extract phone numbers from HTML."""
+    if not html:
+        return []
+    return _PHONE_RE.findall(html)
+
+
+def _check_broken_images(html: str, base_url: str, max_images: int = 10, timeout: int = 5) -> Tuple[int, List[str]]:
+    """
+    Sample image tags and check if they load.
+    Returns (broken_count, list_of_reasons).
+    """
+    if not html or not base_url:
+        return 0, []
+
+    srcs = _IMG_SRC_RE.findall(html)[:max_images]
+    if not srcs:
+        return 0, []
+
+    broken_count = 0
+    broken_reasons: List[str] = []
+
+    for src in srcs:
+        if src.startswith(("data:", "#", "javascript:")):
+            continue
+        full_url = urljoin(base_url, src)
+        try:
+            resp = requests.head(full_url, timeout=timeout, allow_redirects=True)
+            if resp.status_code >= 400:
+                broken_count += 1
+                broken_reasons.append(f"broken_image_{src}")
+        except Exception:
+            broken_count += 1
+            broken_reasons.append(f"broken_image_{src}")
+
+    return broken_count, broken_reasons
+
+
+def _check_dead_social_links(
+    html: str, base_url: str, max_check: int = 5, timeout: int = 5
+) -> Tuple[int, List[str]]:
+    """
+    Check social media links on a page and return dead ones.
+    Returns (dead_count, list_of_reasons).
+    """
+    if not html or not base_url:
+        return 0, []
+
+    hrefs = _A_HREF_RE.findall(html)
+    if not hrefs:
+        return 0, []
+
+    seen: set[str] = set()
+    dead_count = 0
+    dead_reasons: List[str] = []
+
+    for href in hrefs:
+        if len(seen) >= max_check:
+            break
+        full_url = urljoin(base_url, href)
+        if full_url in seen:
+            continue
+        if not _is_social_url(full_url):
+            continue
+        seen.add(full_url)
+        try:
+            resp = requests.head(full_url, timeout=timeout, allow_redirects=True)
+            if resp.status_code in (404, 410):
+                dead_count += 1
+                dead_reasons.append(f"dead_social_link_{full_url}")
+        except Exception:
+            dead_count += 1
+            dead_reasons.append(f"dead_social_link_{full_url}")
+
+    return dead_count, dead_reasons
 
 
 def _check_parked_domain(html: str) -> bool:
@@ -581,6 +700,7 @@ def evaluate_website(
     config: ScoringConfig = None,
     retry_config: RetryConfig = None,
     response: requests.Response = None,
+    expected_phone: Optional[str] = None,
 ) -> ScoringResult:
     """
     Evaluate a website and return a score with reasons.
@@ -712,6 +832,16 @@ def evaluate_website(
             response_time_ms = int(response.elapsed.total_seconds() * 1000)
         except Exception:
             response_time_ms = None
+
+    # === SSL certificate expiry check ===
+    check_url = final_url or url
+    if check_url and check_url.startswith("https://"):
+        hostname = urlparse(check_url).hostname
+        if hostname:
+            days_remaining = _check_ssl_expiry(hostname)
+            if days_remaining is not None and days_remaining <= config.ssl_expiry_days_threshold:
+                score += config.weight_ssl_expiry
+                reasons.append(f"ssl_expires_{days_remaining}_days")
 
     # === Analyze page content ===
     if response_time_ms is not None and response_time_ms >= config.slow_response_ms_threshold:
@@ -846,6 +976,24 @@ def evaluate_website(
             score += 10
         reasons.append(f"outdated_{tech}")
 
+    # Broken images
+    if config.broken_image_check_enabled:
+        broken_count, broken_reasons = _check_broken_images(
+            html, final_url or url, max_images=config.broken_image_max_sample
+        )
+        if broken_count > 0:
+            score += broken_count * config.weight_broken_image
+            reasons.extend(broken_reasons)
+
+    # Dead social links
+    if config.dead_social_check_enabled:
+        dead_social_count, dead_social_reasons = _check_dead_social_links(
+            html, final_url or url, max_check=config.dead_social_max_check
+        )
+        if dead_social_count > 0:
+            score += dead_social_count * config.weight_dead_social_link
+            reasons.extend(dead_social_reasons)
+
     # === Weak signals (low weight) ===
 
     diy_builder = _check_diy_builder(html, final_url or url)
@@ -860,12 +1008,35 @@ def evaluate_website(
         score += weight
         reasons.append(f"diy_{diy_builder}")
 
-    # Marketing spend indicators (non-scoring)
+    # Marketing spend indicators
     for signal in _detect_marketing_signals(html):
         if signal not in reasons:
             reasons.append(signal)
+            weight = {
+                "has_gtm": config.weight_has_gtm,
+                "has_fb_pixel": config.weight_has_fb_pixel,
+                "has_gclid": config.weight_has_gclid,
+            }.get(signal, 0)
+            score += weight
     if final_url and "gclid=" in final_url.lower() and "has_gclid" not in reasons:
         reasons.append("has_gclid")
+        score += config.weight_has_gclid
+
+    # Contact info checks
+    if html:
+        if _EMAIL_RE.search(html) is None:
+            score += config.weight_missing_email
+            reasons.append("missing_email")
+
+        phones_found = _extract_phone_numbers(html)
+        if not phones_found:
+            score += config.weight_missing_phone
+            reasons.append("missing_phone")
+        elif expected_phone:
+            expected_norm = _normalize_phone(expected_phone)
+            if expected_norm and not any(_normalize_phone(p) == expected_norm for p in phones_found):
+                score += config.weight_phone_mismatch
+                reasons.append("phone_mismatch")
 
     score, reasons = _apply_unverified_cap(score, reasons, config)
     return ScoringResult(
@@ -883,13 +1054,14 @@ def evaluate_with_isolation(
     url: str,
     config: ScoringConfig = None,
     retry_config: RetryConfig = None,
+    expected_phone: Optional[str] = None,
 ) -> ScoringResult:
     """
     Evaluate website with full error isolation.
     Never raises exceptions to caller.
     """
     try:
-        return evaluate_website(url, config, retry_config)
+        return evaluate_website(url, config, retry_config, expected_phone=expected_phone)
     except Exception as e:
         logger.error(f"Unexpected error evaluating {url}: {e}")
         config = config or ScoringConfig()

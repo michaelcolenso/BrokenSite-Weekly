@@ -77,6 +77,16 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
         "has_marketing_pixel",
         "exclusive_until",
         "place_id",
+        "competitor_gap",
+        "competitor_1_name",
+        "competitor_1_score",
+        "competitor_1_reviews",
+        "competitor_2_name",
+        "competitor_2_score",
+        "competitor_2_reviews",
+        "competitor_3_name",
+        "competitor_3_score",
+        "competitor_3_reviews",
     ]
 
     # Write to string buffer
@@ -96,6 +106,21 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
         row["suggested_pitch"] = suggested_pitch_from_reasons(reasons)
         row["has_marketing_pixel"] = "yes" if has_marketing_pixel(reasons) else "no"
         row["reasons"] = _sanitize_csv_value(",".join(reasons_list))
+
+        # Competitor data
+        competitors_json = lead.get("competitors_json")
+        if competitors_json:
+            try:
+                import json
+                comp_data = json.loads(competitors_json)
+                row["competitor_gap"] = comp_data.get("gap_text", "")
+                for i, comp in enumerate(comp_data.get("competitors", [])[:3], 1):
+                    row[f"competitor_{i}_name"] = comp.get("name", "")
+                    row[f"competitor_{i}_score"] = comp.get("score", "")
+                    row[f"competitor_{i}_reviews"] = comp.get("review_count", "")
+            except Exception:
+                pass
+
         writer.writerow(row)
 
     csv_content = buffer.getvalue()

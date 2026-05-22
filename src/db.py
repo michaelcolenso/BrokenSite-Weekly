@@ -37,6 +37,7 @@ class Lead:
     exclusive_until: Optional[datetime] = None
     exclusive_tier: Optional[str] = None
     lead_tier: Optional[str] = None
+    competitors_json: Optional[str] = None
 
 
 SCHEMA = """
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS leads (
     exported_pro_at TIMESTAMP,
     exclusive_until TIMESTAMP,
     exclusive_tier TEXT,
-    lead_tier TEXT
+    lead_tier TEXT,
+    competitors_json TEXT
 );
 
 -- Index for deduplication lookups
@@ -216,6 +218,8 @@ class Database:
             conn.execute("ALTER TABLE leads ADD COLUMN exclusive_tier TEXT")
         if "lead_tier" not in lead_columns:
             conn.execute("ALTER TABLE leads ADD COLUMN lead_tier TEXT")
+        if "competitors_json" not in lead_columns:
+            conn.execute("ALTER TABLE leads ADD COLUMN competitors_json TEXT")
 
         export_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(exports)").fetchall()
@@ -342,8 +346,8 @@ class Database:
                 INSERT INTO leads (
                     place_id, cid, name, website, address, phone,
                     review_count, city, category, score, reasons, first_seen, last_seen,
-                    exclusive_until, exclusive_tier, lead_tier
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    exclusive_until, exclusive_tier, lead_tier, competitors_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(place_id) DO UPDATE SET
                     name = excluded.name,
                     website = excluded.website,
@@ -358,7 +362,8 @@ class Database:
                     cid = excluded.cid,
                     exclusive_until = excluded.exclusive_until,
                     exclusive_tier = excluded.exclusive_tier,
-                    lead_tier = excluded.lead_tier
+                    lead_tier = excluded.lead_tier,
+                    competitors_json = excluded.competitors_json
                 WHERE leads.last_seen <= ?
                 RETURNING place_id
             """, (
@@ -366,9 +371,17 @@ class Database:
                 lead.address, lead.phone, lead.review_count, lead.city, lead.category,
                 lead.score, reasons_json, now, now,
                 lead.exclusive_until, lead.exclusive_tier, lead.lead_tier,
-                cutoff
+                lead.competitors_json, cutoff
             )).fetchone()
             return row is not None
+
+    def update_lead_competitors(self, place_id: str, competitors_json: str) -> None:
+        """Update competitor data for an existing lead."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE leads SET competitors_json = ? WHERE place_id = ?",
+                (competitors_json, place_id),
+            )
 
     def get_unexported_leads(
         self,
@@ -394,7 +407,7 @@ class Database:
                 rows = conn.execute("""
                     SELECT place_id, cid, name, website, address, phone, review_count,
                            city, category, score, reasons, first_seen, lead_tier,
-                           exclusive_until, exclusive_tier
+                           exclusive_until, exclusive_tier, competitors_json
                     FROM leads
                     WHERE score >= ? AND website IS NOT NULL
                       AND exported_pro_at IS NULL
@@ -405,7 +418,7 @@ class Database:
                 rows = conn.execute("""
                     SELECT place_id, cid, name, website, address, phone, review_count,
                            city, category, score, reasons, first_seen, lead_tier,
-                           exclusive_until, exclusive_tier
+                           exclusive_until, exclusive_tier, competitors_json
                     FROM leads
                     WHERE score >= ? AND website IS NOT NULL
                       AND exported_basic_at IS NULL

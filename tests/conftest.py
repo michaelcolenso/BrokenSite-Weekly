@@ -182,6 +182,8 @@ def sample_html_modern() -> str:
         <main>
             <h1>Professional Plumbing Services</h1>
             <p>24/7 emergency service available.</p>
+            <p>Call us: (555) 987-6543</p>
+            <p>Email: <a href="mailto:info@proplumbing.com">info@proplumbing.com</a></p>
         </main>
         <footer>
             <p>\u00a9 2024 Professional Plumbing. All Rights Reserved.</p>

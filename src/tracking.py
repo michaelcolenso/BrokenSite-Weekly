@@ -296,13 +296,30 @@ async def portal_download(filename: str, token: str = ""):
             status_code=403,
         )
 
-    requested = (OUTPUT_DIR / filename).resolve()
-    if not str(requested).startswith(str(OUTPUT_DIR.resolve())):
+    email, _ = verified
+    output_dir = OUTPUT_DIR.resolve()
+    requested = (output_dir / filename).resolve()
+    try:
+        requested.relative_to(output_dir)
+    except ValueError:
         return _render_error_page(
             title="Invalid request",
             message="The file path you requested is not allowed.",
             from_email=config.smtp.from_email,
             status_code=400,
+        )
+    exports = _get_db().get_recent_exports(email, limit=50)
+    allowed_paths = {
+        Path(export["csv_path"]).resolve()
+        for export in exports
+        if export.get("csv_path")
+    }
+    if requested not in allowed_paths:
+        return _render_error_page(
+            title="File not found",
+            message="The file you requested is not available for this account.",
+            from_email=config.smtp.from_email,
+            status_code=404,
         )
     if not requested.exists():
         return _render_error_page(

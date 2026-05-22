@@ -2,9 +2,12 @@
 Tests for the database module.
 """
 
+import sqlite3
+
 import pytest
 from datetime import datetime, timedelta
 
+from src.config import DatabaseConfig
 from src.db import Database, Lead
 
 
@@ -60,6 +63,73 @@ class TestDatabaseInitialization:
             assert "lead_tier" in cols
             assert "exported_basic_at" in cols
             assert "exported_pro_at" in cols
+
+    def test_migrates_existing_leads_table_for_competitor_metadata(self, tmp_path):
+        """Older databases should gain competitor metadata before writes use it."""
+        db_path = tmp_path / "legacy_leads.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE leads (
+                    place_id TEXT PRIMARY KEY,
+                    cid TEXT,
+                    name TEXT NOT NULL,
+                    website TEXT,
+                    address TEXT,
+                    phone TEXT,
+                    review_count INTEGER,
+                    city TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    reasons TEXT,
+                    first_seen TIMESTAMP NOT NULL,
+                    last_seen TIMESTAMP NOT NULL,
+                    exported_count INTEGER DEFAULT 0,
+                    last_exported TIMESTAMP,
+                    exported_basic_at TIMESTAMP,
+                    exported_pro_at TIMESTAMP,
+                    exclusive_until TIMESTAMP,
+                    exclusive_tier TEXT,
+                    lead_tier TEXT
+                )
+                """
+            )
+
+        db = Database(DatabaseConfig(db_path=db_path))
+        try:
+            lead = Lead(
+                place_id="legacy-place",
+                cid="legacy-cid",
+                name="Legacy Lead",
+                website="https://legacy.example",
+                address="1 Old Schema Way",
+                phone="555-0100",
+                review_count=12,
+                city="Austin, TX",
+                category="plumber",
+                score=80,
+                reasons=["ssl_error"],
+                first_seen=datetime.utcnow(),
+                last_seen=datetime.utcnow(),
+                competitors_json='{"gap_text": "test"}',
+            )
+
+            assert db.upsert_lead(lead)
+
+            with db._connect() as conn:
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(leads)").fetchall()
+                }
+                row = conn.execute(
+                    "SELECT competitors_json FROM leads WHERE place_id = ?",
+                    (lead.place_id,),
+                ).fetchone()
+
+            assert "competitors_json" in columns
+            assert row["competitors_json"] == lead.competitors_json
+        finally:
+            db.close()
 
 
 class TestLeadUpsert:

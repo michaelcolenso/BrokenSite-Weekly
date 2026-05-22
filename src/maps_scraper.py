@@ -497,13 +497,14 @@ def scrape_with_isolation(
     city: str,
     category: str,
     config: ScraperConfig = None,
+    max_results: int = None,
 ) -> tuple[List[Business], Optional[str]]:
     """
     Scrape with error isolation - returns results and error message.
     Never raises exceptions to caller.
     """
     try:
-        results = scrape_businesses(city, category, config)
+        results = scrape_businesses(city, category, config, max_results=max_results)
         return results, None
     except Exception as e:
         logger.error(f"Isolated scrape error for {category} in {city}: {e}")

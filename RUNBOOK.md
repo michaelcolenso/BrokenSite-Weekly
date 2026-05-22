@@ -9,11 +9,23 @@ Weekly Timer (systemd)
             │       ├── maps_scraper.py → Google Maps
             │       ├── scoring.py → Website checks
             │       └── db.py → SQLite storage
-            │
-            └── Phase 2: Delivery
-                    ├── gumroad.py → Get subscribers
-                    └── delivery.py → Send emails
+            ├── Optional Phase 1b: Competitor analysis
+            ├── Phase 2: Delivery
+            │       ├── gumroad.py → Get subscribers
+            │       └── delivery.py → Send CSV emails
+            ├── Phase 3: Manual review export
+            └── Optional Phases 4-7: Audits, contacts, outreach, warm delivery
 ```
+
+Core weekly delivery is the default launch mode. `OUTREACH_ENABLED=true`
+enables the optional audit/contact/outreach/warm phases and requires live
+tracking infrastructure plus compliance configuration.
+
+The launch scrape grid comes from `SEARCH_QUERIES_JSON` and
+`TARGET_CITIES_JSON`. Keep their Cartesian product within the measured runtime
+budget; the default `.env.example` grid is 3 categories by 3 cities. Sampled
+broken-image and dead-social HEAD probes are separately controlled by
+`BROKEN_IMAGE_CHECK_ENABLED` and `DEAD_SOCIAL_CHECK_ENABLED`.
 
 ## File Locations
 
@@ -24,6 +36,8 @@ Weekly Timer (systemd)
 | `/opt/brokensite-weekly/data/leads.db` | SQLite database |
 | `/opt/brokensite-weekly/logs/brokensite-weekly.log` | Application logs |
 | `/opt/brokensite-weekly/output/leads_YYYY-MM-DD.csv` | Weekly CSV exports |
+| `/opt/brokensite-weekly/output/kpi_baseline_*.json` | Run KPI snapshots |
+| `/opt/brokensite-weekly/output/manual_review_YYYY-MM-DD.csv` | Unverified lead review export |
 | `/opt/brokensite-weekly/debug/` | Screenshots/HTML on failures |
 
 ## Database Schema
@@ -101,6 +115,9 @@ sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --sc
 
 # Deliver only (use existing leads)
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --deliver-only
+
+# Required no-email smoke before first scheduled delivery after deploy
+sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --scrape-only --dry-run --no-outreach
 ```
 
 ### View Logs
@@ -207,6 +224,18 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 # Edit src/config.py:
 #   max_results_per_query = 30  (was 50)
 #   max_scrolls = 10  (was 15)
+```
+
+### Roll Back A Failed Upgrade
+
+If the first post-upgrade smoke or scheduled run fails after a database/schema
+change, stop the timer before restoring the pre-ship files:
+
+```bash
+sudo systemctl stop brokensite-weekly.timer
+sudo -u brokensite cp /opt/brokensite-weekly/data/leads.db.pre-ship /opt/brokensite-weekly/data/leads.db
+sudo install -m 600 -o brokensite -g brokensite /opt/brokensite-weekly/.env.pre-ship /opt/brokensite-weekly/.env
+sudo systemctl start brokensite-weekly.timer
 ```
 
 ## Scoring Reference

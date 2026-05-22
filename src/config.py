@@ -3,6 +3,7 @@ Configuration management for BrokenSite-Weekly.
 Loads from environment variables with sensible defaults.
 """
 
+import json
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -16,6 +17,24 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 DEBUG_DIR = PROJECT_ROOT / "debug"
 
 
+def _load_json_list_env(name: str, default: List[str]) -> List[str]:
+    """Load a string list from JSON env, falling back to launch defaults."""
+    raw_value = os.environ.get(name, "")
+    if not raw_value:
+        return list(default)
+
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return list(default)
+
+    if not isinstance(value, list):
+        return list(default)
+
+    items = [str(item).strip() for item in value if str(item).strip()]
+    return items or list(default)
+
+
 @dataclass
 class ScraperConfig:
     """Playwright Maps scraper configuration."""
@@ -25,6 +44,9 @@ class ScraperConfig:
     max_scrolls: int = 15
     max_results_per_query: int = 50
     max_workers: int = field(default_factory=lambda: int(os.environ.get("SCRAPER_MAX_WORKERS", "5")))
+    competitor_analysis_enabled: bool = field(
+        default_factory=lambda: os.environ.get("COMPETITOR_ANALYSIS_ENABLED", "false").lower() == "true"
+    )
     screenshot_on_failure: bool = True
     html_dump_on_failure: bool = True
     user_agent: str = (
@@ -64,6 +86,34 @@ class ScoringConfig:
     weight_missing_h1: int = 8
     weight_generic_title: int = 10
     weight_under_construction: int = 70
+
+    # Marketing spend indicators (businesses already paying for ads = hotter leads)
+    weight_has_gtm: int = 15
+    weight_has_fb_pixel: int = 15
+    weight_has_gclid: int = 10
+
+    # SSL certificate expiry
+    ssl_expiry_days_threshold: int = 30
+    weight_ssl_expiry: int = 25
+
+    # Broken image detection
+    broken_image_check_enabled: bool = field(
+        default_factory=lambda: os.environ.get("BROKEN_IMAGE_CHECK_ENABLED", "false").lower() == "true"
+    )
+    broken_image_max_sample: int = 10
+    weight_broken_image: int = 15
+
+    # Contact info signals
+    weight_phone_mismatch: int = 20
+    weight_missing_phone: int = 10
+    weight_missing_email: int = 10
+
+    # Dead social links
+    dead_social_check_enabled: bool = field(
+        default_factory=lambda: os.environ.get("DEAD_SOCIAL_CHECK_ENABLED", "false").lower() == "true"
+    )
+    weight_dead_social_link: int = 15
+    dead_social_max_check: int = 5
 
     # Weak signals (DIY builders - low weight to avoid false positives)
     weight_wix: int = 5
@@ -161,7 +211,7 @@ class DatabaseConfig:
 @dataclass
 class OutreachConfig:
     """Outreach/warm lead configuration."""
-    enabled: bool = field(default_factory=lambda: os.environ.get("OUTREACH_ENABLED", "true").lower() == "true")
+    enabled: bool = field(default_factory=lambda: os.environ.get("OUTREACH_ENABLED", "false").lower() == "true")
 
     # Sending limits
     max_emails_per_day: int = field(default_factory=lambda: int(os.environ.get("OUTREACH_MAX_EMAILS_PER_DAY", "300")))
@@ -216,32 +266,18 @@ class Config:
     portal: PortalConfig = field(default_factory=PortalConfig)
 
     # Search queries - niches to target
-    search_queries: List[str] = field(default_factory=lambda: [
+    search_queries: List[str] = field(default_factory=lambda: _load_json_list_env("SEARCH_QUERIES_JSON", [
         "plumber",
         "electrician",
-        "hvac repair",
-        "roofing contractor",
-        "landscaping service",
-        "auto repair shop",
         "dentist",
-        "chiropractor",
-        "hair salon",
-        "restaurant",
-    ])
+    ]))
 
     # Target cities for geographic rotation
-    target_cities: List[str] = field(default_factory=lambda: [
+    target_cities: List[str] = field(default_factory=lambda: _load_json_list_env("TARGET_CITIES_JSON", [
         "Austin, TX",
         "Denver, CO",
         "Phoenix, AZ",
-        "Nashville, TN",
-        "Charlotte, NC",
-        "Portland, OR",
-        "San Antonio, TX",
-        "Jacksonville, FL",
-        "Columbus, OH",
-        "Indianapolis, IN",
-    ])
+    ]))
 
 
 def load_config() -> Config:

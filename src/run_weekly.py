@@ -27,6 +27,8 @@ from .contact_finder import find_contact_with_isolation
 from .outreach import run_outreach, run_followups
 from .warm_delivery import deliver_warm_leads_with_isolation
 from .lead_utils import compute_lead_tier, compute_exclusive_until
+from .competitor_analysis import analyze_competitors_for_lead
+from .market_reports import generate_market_report, write_market_report
 
 logger = get_logger("orchestrator")
 
@@ -183,9 +185,7 @@ def process_business(
                     f"Lead: {business.name} | no website | "
                     f"Score: {lead.score} | Reasons: {','.join(lead.reasons)}"
                 )
-                return lead
-
-            return None
+            return lead
 
         run_ctx.increment("websites_checked")
 
@@ -196,6 +196,7 @@ def process_business(
             url=business.website,
             config=config.scoring,
             retry_config=config.retry,
+            expected_phone=business.phone,
         )
         run_ctx.count_reasons(result.reasons)
 
@@ -248,12 +249,7 @@ def process_business(
                 f"Lead: {business.name} | {business.website} | "
                 f"Score: {result.score} | Reasons: {','.join(result.reasons)}"
             )
-            return lead
-        else:
-            logger.debug(
-                f"Low score: {business.name} | Score: {result.score}"
-            )
-            return None
+        return lead
 
     except Exception as e:
         logger.error(f"Error processing {business.name}: {e}")
@@ -276,6 +272,7 @@ def run_scraping_phase(
         dry_run: If True, skip database writes.
     """
     qualifying_leads = []
+    market_report_paths = []
 
     from .maps_scraper import scrape_with_isolation
 
@@ -306,6 +303,7 @@ def run_scraping_phase(
             run_ctx.increment("businesses_found", len(businesses))
 
             # Process each business concurrently
+            batch_leads = []
             max_workers = getattr(config.scraper, 'max_workers', 5)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
@@ -319,9 +317,39 @@ def run_scraping_phase(
                     try:
                         lead = future.result()
                         if lead:
-                            qualifying_leads.append(lead)
+                            batch_leads.append(lead)
                     except Exception as e:
                         logger.error(f"Error processing business concurrently: {e}")
+
+            # Filter qualifying leads from batch
+            batch_qualifying = [
+                l for l in batch_leads
+                if l.score >= config.scoring.min_score_to_include
+            ]
+            qualifying_leads.extend(batch_qualifying)
+
+            # Generate market report for this batch
+            if businesses:
+                try:
+                    report_text = generate_market_report(
+                        city=city,
+                        category=category,
+                        businesses=businesses,
+                        all_leads=batch_leads,
+                        min_score=config.scoring.min_score_to_include,
+                    )
+                    if report_text:
+                        report_path = write_market_report(
+                            report_text=report_text,
+                            output_dir=OUTPUT_DIR,
+                            city=city,
+                            category=category,
+                        )
+                        market_report_paths.append(str(report_path))
+                except Exception as e:
+                    logger.warning(f"Failed to generate market report for {category} in {city}: {e}")
+
+    run_ctx.stats["market_report_paths"] = market_report_paths
 
     duration = run_ctx.stats.get("phase_durations_seconds", {}).get("scraping", 0.0)
     websites_checked = run_ctx.stats.get("websites_checked", 0)
@@ -817,6 +845,23 @@ def run_weekly(
                     if not dry_run:
                         db.complete_run(run_ctx.run_id, run_ctx.stats, "shutdown_requested")
                     return
+
+                # Phase 1b: Competitor Analysis
+                if config.scraper.competitor_analysis_enabled and scraped_qualifying_leads:
+                    logger.info("=== Phase 1b: Competitor Analysis ===")
+                    run_ctx.start_phase("competitor_analysis")
+                    for lead in scraped_qualifying_leads:
+                        if shutdown.check():
+                            break
+                        try:
+                            competitors_json = analyze_competitors_for_lead(lead, config)
+                            if competitors_json and not dry_run:
+                                db.update_lead_competitors(lead.place_id, competitors_json)
+                                lead.competitors_json = competitors_json
+                        except Exception as e:
+                            logger.warning(f"Competitor analysis failed for {lead.name}: {e}")
+                    duration = run_ctx.end_phase("competitor_analysis")
+                    logger.info("Phase 'competitor_analysis' completed in %.2fs", duration)
 
             # Optional: Local CSV export (no emails, no export marking)
             if export_csv:

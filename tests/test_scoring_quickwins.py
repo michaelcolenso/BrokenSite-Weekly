@@ -45,6 +45,8 @@ BASE_HTML = f"""
   <body>
     <h1>Example</h1>
     <p>{"x" * 200}</p>
+    <p>Call us: (555) 123-4567</p>
+    <p>Email: <a href="mailto:info@example.com">info@example.com</a></p>
   </body>
 </html>
 """
