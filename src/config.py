@@ -42,7 +42,9 @@ class ScraperConfig:
     timeout_ms: int = 30000
     scroll_pause_ms: int = 1500
     max_scrolls: int = 15
-    max_results_per_query: int = 50
+    max_results_per_query: int = field(
+        default_factory=lambda: int(os.environ.get("SCRAPER_MAX_RESULTS_PER_QUERY", "25"))
+    )
     max_workers: int = field(default_factory=lambda: int(os.environ.get("SCRAPER_MAX_WORKERS", "5")))
     competitor_analysis_enabled: bool = field(
         default_factory=lambda: os.environ.get("COMPETITOR_ANALYSIS_ENABLED", "false").lower() == "true"

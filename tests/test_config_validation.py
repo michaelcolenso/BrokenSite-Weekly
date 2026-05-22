@@ -95,3 +95,11 @@ def test_config_accepts_json_query_grid_overrides(monkeypatch):
 
     assert config.search_queries == queries
     assert config.target_cities == cities
+
+
+def test_scraper_launch_result_budget_can_be_overridden(monkeypatch):
+    monkeypatch.delenv("SCRAPER_MAX_RESULTS_PER_QUERY", raising=False)
+    assert Config().scraper.max_results_per_query == 25
+
+    monkeypatch.setenv("SCRAPER_MAX_RESULTS_PER_QUERY", "10")
+    assert Config().scraper.max_results_per_query == 10

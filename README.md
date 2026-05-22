@@ -81,11 +81,12 @@ OUTREACH_ENABLED=false
 ./venv/bin/python -m src.run_weekly --scrape-only --dry-run --no-outreach
 ```
 
-The default launch scrape grid is three categories by three cities. Expand it
-with `SEARCH_QUERIES_JSON` and `TARGET_CITIES_JSON` only after dry-run timing
-fits the systemd timeout. `BROKEN_IMAGE_CHECK_ENABLED` and
-`DEAD_SOCIAL_CHECK_ENABLED` are off by default because they add sampled outbound
-HEAD requests per scored site.
+The default launch scrape grid is three categories by three cities and extracts
+up to 25 Maps card detail panels per query. Expand it with
+`SEARCH_QUERIES_JSON`, `TARGET_CITIES_JSON`, or
+`SCRAPER_MAX_RESULTS_PER_QUERY` only after dry-run timing fits the systemd
+timeout. `BROKEN_IMAGE_CHECK_ENABLED` and `DEAD_SOCIAL_CHECK_ENABLED` are off
+by default because they add sampled outbound HEAD requests per scored site.
 
 Set `OUTREACH_ENABLED=true` only after the tracking domain is live and the
 required outreach compliance fields in `.env.example` are configured.

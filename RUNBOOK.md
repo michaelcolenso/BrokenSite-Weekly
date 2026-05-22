@@ -21,10 +21,11 @@ Core weekly delivery is the default launch mode. `OUTREACH_ENABLED=true`
 enables the optional audit/contact/outreach/warm phases and requires live
 tracking infrastructure plus compliance configuration.
 
-The launch scrape grid comes from `SEARCH_QUERIES_JSON` and
-`TARGET_CITIES_JSON`. Keep their Cartesian product within the measured runtime
-budget; the default `.env.example` grid is 3 categories by 3 cities. Sampled
-broken-image and dead-social HEAD probes are separately controlled by
+The launch scrape budget comes from `SEARCH_QUERIES_JSON`,
+`TARGET_CITIES_JSON`, and `SCRAPER_MAX_RESULTS_PER_QUERY`. Keep the query grid
+and per-query card detail count within the measured runtime budget; the default
+`.env.example` grid is 3 categories by 3 cities with 25 card details per query.
+Sampled broken-image and dead-social HEAD probes are separately controlled by
 `BROKEN_IMAGE_CHECK_ENABLED` and `DEAD_SOCIAL_CHECK_ENABLED`.
 
 ## File Locations
@@ -220,9 +221,9 @@ curl -H "Authorization: Bearer YOUR_TOKEN" \
 
 **Fix**:
 ```bash
-# Reduce concurrent operations in config
-# Edit src/config.py:
-#   max_results_per_query = 30  (was 50)
+# Reduce card detail extraction before changing code:
+#   SCRAPER_MAX_RESULTS_PER_QUERY=15
+# Edit src/config.py only if scrolling itself must be reduced:
 #   max_scrolls = 10  (was 15)
 ```
 
