@@ -10,6 +10,10 @@ Fully unattended weekly lead-generation system for local businesses with broken/
 4. **Dedupes** using Google Place IDs
 5. **Emails** weekly CSV to active Gumroad subscribers
 
+The first production ship mode is the core weekly pipeline above. Outreach,
+audit tracking, warm-lead delivery, and subscriber portal links are opt-in
+surfaces that require tracking infrastructure and compliance configuration.
+
 ## Quick Start
 
 ```bash
@@ -51,6 +55,7 @@ src/
 ├── scoring.py         # Website health scoring
 ├── gumroad.py         # Subscriber retrieval (read-only)
 ├── delivery.py        # SMTP with CSV attachment
+├── tracking.py        # Optional portal, audit, and engagement endpoints
 └── run_weekly.py      # Main orchestrator
 ```
 
@@ -63,6 +68,27 @@ src/
 | 5-15 | Weak (DIY builders like Wix, Squarespace) | Low |
 
 Only leads scoring **≥40** are exported.
+
+## Launch Modes
+
+Core weekly delivery is the default:
+
+```bash
+# Outreach stays off unless explicitly enabled in the environment.
+OUTREACH_ENABLED=false
+
+./venv/bin/python -m src.run_weekly --validate
+./venv/bin/python -m src.run_weekly --scrape-only --dry-run --no-outreach
+```
+
+The default launch scrape grid is three categories by three cities. Expand it
+with `SEARCH_QUERIES_JSON` and `TARGET_CITIES_JSON` only after dry-run timing
+fits the systemd timeout. `BROKEN_IMAGE_CHECK_ENABLED` and
+`DEAD_SOCIAL_CHECK_ENABLED` are off by default because they add sampled outbound
+HEAD requests per scored site.
+
+Set `OUTREACH_ENABLED=true` only after the tracking domain is live and the
+required outreach compliance fields in `.env.example` are configured.
 
 ## Business Model
 

@@ -73,6 +73,17 @@ sudo -u brokensite nano .env
 | `SMTP_FROM_EMAIL` | Sender email | `you@gmail.com` |
 | `SMTP_FROM_NAME` | Sender display name | `BrokenSite Weekly` |
 
+The core weekly launch keeps `OUTREACH_ENABLED=false`. Outreach, audit links,
+warm lead delivery, and portal links should be enabled only after the tracking
+service and tracking domain are deployed and outreach compliance fields are
+filled in.
+
+`.env.example` also keeps the weekly scrape grid bounded with
+`SEARCH_QUERIES_JSON` and `TARGET_CITIES_JSON`. Increase those JSON lists only
+after a scrape-only dry run fits the two-hour systemd timeout. The optional
+broken-image and dead-social scoring probes add outbound HEAD requests and stay
+off until they are measured.
+
 ### Getting Gumroad Credentials
 
 1. Go to https://app.gumroad.com/settings/advanced
@@ -107,6 +118,13 @@ sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --sc
 
 # Check results
 sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --stats
+```
+
+Before upgrading an existing production install, keep a rollback copy:
+
+```bash
+sudo -u brokensite cp /opt/brokensite-weekly/data/leads.db /opt/brokensite-weekly/data/leads.db.pre-ship
+sudo install -m 600 -o brokensite -g brokensite /opt/brokensite-weekly/.env /opt/brokensite-weekly/.env.pre-ship
 ```
 
 ## 6. Install systemd Service
@@ -150,7 +168,9 @@ tail -f /opt/brokensite-weekly/logs/brokensite-weekly.log
 ```bash
 cd /opt/brokensite-weekly
 sudo -u brokensite git pull
-sudo -u brokensite ./venv/bin/pip install -r requirements.txt
+sudo -u brokensite uv pip install -r requirements.txt --python /opt/brokensite-weekly/venv/bin/python
+sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --validate
+sudo -u brokensite /opt/brokensite-weekly/venv/bin/python -m src.run_weekly --scrape-only --dry-run --no-outreach
 sudo systemctl daemon-reload
 ```
 

@@ -109,6 +109,10 @@ SELECTORS = {
         "button[aria-label*='reviews']",
         "span[aria-label*='reviews']",
         "span[aria-label*='review']",
+        "div[aria-label*='reviews']",
+        "div[aria-label*='review']",
+        "[aria-label*=' reviews']",
+        "button[jsaction*='review']",
     ],
 }
 
@@ -318,13 +322,21 @@ def _extract_business_details(page: Page, city: str, category: str, config: Scra
 
         # Extract review count
         review_count = None
-        review_el = _try_selectors(page, SELECTORS["review_count"], timeout=1000)
+        review_el = _try_selectors(page, SELECTORS["review_count"], timeout=3000)
         if review_el:
             review_text = review_el.get_attribute("aria-label") or review_el.inner_text()
             if review_text:
-                match = re.search(r"([0-9][0-9,]*)", review_text)
-                if match:
+                # Prefer "N reviews" pattern to avoid matching star ratings (e.g., 4.5)
+                match = re.search(r"([0-9][0-9,]*)\s+review", review_text, re.IGNORECASE)
+                if not match:
+                    # Fallback: grab the largest number in the text
+                    nums = re.findall(r"([0-9][0-9,]*)", review_text)
+                    if nums:
+                        review_count = max(int(n.replace(",", "")) for n in nums)
+                else:
                     review_count = int(match.group(1).replace(",", ""))
+            if review_count:
+                logger.debug(f"Extracted review_count={review_count} from text: {review_text!r}")
 
         return Business(
             place_id=place_id,
@@ -485,13 +497,14 @@ def scrape_with_isolation(
     city: str,
     category: str,
     config: ScraperConfig = None,
+    max_results: int = None,
 ) -> tuple[List[Business], Optional[str]]:
     """
     Scrape with error isolation - returns results and error message.
     Never raises exceptions to caller.
     """
     try:
-        results = scrape_businesses(city, category, config)
+        results = scrape_businesses(city, category, config, max_results=max_results)
         return results, None
     except Exception as e:
         logger.error(f"Isolated scrape error for {category} in {city}: {e}")

@@ -478,3 +478,596 @@ class TestScoreThreshold:
         # (unless there are other issues)
         assert "diy_wix" in result.reasons
         # The score might include other signals, but Wix alone shouldn't push it over
+
+
+_BASE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="A great business">
+    <title>Business Name</title>
+</head>
+<body>
+    <h1>Welcome</h1>
+    <p>We do great work.</p>
+    <p>Call us: (555) 123-4567</p>
+    <p>Email: <a href="mailto:info@example.com">info@example.com</a></p>
+    <footer><p>© 2026 Business Name. All rights reserved.</p></footer>
+</body>
+</html>"""
+
+
+class TestMarketingSignalScoring:
+    """Tests for marketing signal detection and scoring."""
+
+    @pytest.fixture(autouse=True)
+    def disable_playwright(self, scoring_config):
+        """Disable playwright fallback for unit tests."""
+        scoring_config.playwright_fallback_enabled = False
+
+    @patch("src.scoring.fetch_website")
+    def test_gtm_adds_weight_and_reason(self, mock_fetch, scoring_config):
+        """Google Tag Manager detection should add weight and reason."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            '<script src="https://www.googletagmanager.com/gtm.js?id=GTM-123"></script></head>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "has_gtm" in result.reasons
+        assert result.score == scoring_config.weight_has_gtm
+
+    @patch("src.scoring.fetch_website")
+    def test_fb_pixel_adds_weight_and_reason(self, mock_fetch, scoring_config):
+        """Facebook Pixel detection should add weight and reason."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            '<script>!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){};fbq("init","123");</script></head>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "has_fb_pixel" in result.reasons
+        assert result.score == scoring_config.weight_has_fb_pixel
+
+    @patch("src.scoring.fetch_website")
+    def test_gclid_in_html_adds_weight_and_reason(self, mock_fetch, scoring_config):
+        """gclid in HTML should add weight and reason."""
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<a href="https://example.com/landing?gclid=abc123">Click</a></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "has_gclid" in result.reasons
+        assert result.score == scoring_config.weight_has_gclid
+
+    @patch("src.scoring.fetch_website")
+    def test_gclid_in_final_url_adds_weight_and_reason(self, mock_fetch, scoring_config):
+        """gclid in final URL should add weight and reason."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com/landing?gclid=abc123"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "has_gclid" in result.reasons
+        assert result.score == scoring_config.weight_has_gclid
+
+    @patch("src.scoring.fetch_website")
+    def test_multiple_marketing_signals_stack(self, mock_fetch, scoring_config):
+        """Multiple marketing signals should stack their weights."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            (
+                '<script src="https://www.googletagmanager.com/gtm.js?id=GTM-123"></script>'
+                '<script>!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){};fbq("init","123");</script>'
+                '</head>'
+            )
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "has_gtm" in result.reasons
+        assert "has_fb_pixel" in result.reasons
+        expected = scoring_config.weight_has_gtm + scoring_config.weight_has_fb_pixel
+        assert result.score == expected
+
+    @patch("src.scoring.fetch_website")
+    def test_no_marketing_signals_no_extra_score(self, mock_fetch, scoring_config):
+        """A clean site should not have marketing reasons or extra score."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "has_gtm" not in result.reasons
+        assert "has_fb_pixel" not in result.reasons
+        assert "has_gclid" not in result.reasons
+        assert result.score == 0
+
+
+class TestSslExpiryScoring:
+    """Tests for SSL certificate expiry scoring."""
+
+    @pytest.fixture(autouse=True)
+    def disable_playwright(self, scoring_config):
+        """Disable playwright fallback for unit tests."""
+        scoring_config.playwright_fallback_enabled = False
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring._check_ssl_expiry")
+    def test_ssl_expiring_soon_adds_weight_and_reason(self, mock_ssl_check, mock_fetch, scoring_config):
+        """An SSL cert expiring within threshold should add weight and reason."""
+        mock_ssl_check.return_value = 12
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "ssl_expires_12_days" in result.reasons
+        assert result.score == scoring_config.weight_ssl_expiry
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring._check_ssl_expiry")
+    def test_ssl_not_expiring_no_score(self, mock_ssl_check, mock_fetch, scoring_config):
+        """An SSL cert with plenty of time left should not add score."""
+        mock_ssl_check.return_value = 90
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert not any(r.startswith("ssl_expires_") for r in result.reasons)
+        assert result.score == 0
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring._check_ssl_expiry")
+    def test_http_site_skips_ssl_check(self, mock_ssl_check, mock_fetch, scoring_config):
+        """HTTP-only sites should not trigger SSL expiry checks."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "http://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("http://example.com", config=scoring_config)
+
+        mock_ssl_check.assert_not_called()
+        assert not any(r.startswith("ssl_expires_") for r in result.reasons)
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring._check_ssl_expiry")
+    def test_ssl_check_failure_is_graceful(self, mock_ssl_check, mock_fetch, scoring_config):
+        """If SSL check fails, scoring should continue without error."""
+        mock_ssl_check.return_value = None
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert not any(r.startswith("ssl_expires_") for r in result.reasons)
+        assert result.score == 0
+
+
+class TestBrokenImageScoring:
+    """Tests for broken image detection and scoring."""
+
+    @pytest.fixture(autouse=True)
+    def disable_playwright(self, scoring_config):
+        """Disable playwright fallback for unit tests."""
+        scoring_config.playwright_fallback_enabled = False
+        scoring_config.broken_image_check_enabled = True
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_disabled_broken_image_check_skips_head_requests(
+        self,
+        mock_head,
+        mock_fetch,
+        scoring_config,
+    ):
+        """Launch config should be able to skip sampled image probes."""
+        scoring_config.broken_image_check_enabled = False
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<img src="/photo.jpg" alt="photo"></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        mock_head.assert_not_called()
+        assert not any(r.startswith("broken_image_") for r in result.reasons)
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_one_broken_image_adds_weight_and_reason(self, mock_head, mock_fetch, scoring_config):
+        """A single broken image should add weight and a reason."""
+        mock_head.return_value = Mock(status_code=404)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<img src="/photo.jpg" alt="photo"></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert any(r.startswith("broken_image_") for r in result.reasons)
+        assert result.score == scoring_config.weight_broken_image
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_multiple_broken_images_stack(self, mock_head, mock_fetch, scoring_config):
+        """Multiple broken images should stack their weights."""
+        mock_head.return_value = Mock(status_code=404)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<img src="/a.jpg"><img src="/b.jpg"></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        broken_reasons = [r for r in result.reasons if r.startswith("broken_image_")]
+        assert len(broken_reasons) == 2
+        assert result.score == 2 * scoring_config.weight_broken_image
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_working_images_add_no_score(self, mock_head, mock_fetch, scoring_config):
+        """Images that return 200 should not add score."""
+        mock_head.return_value = Mock(status_code=200)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<img src="/photo.jpg" alt="photo"></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert not any(r.startswith("broken_image_") for r in result.reasons)
+        assert result.score == 0
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_no_images_no_score(self, mock_head, mock_fetch, scoring_config):
+        """HTML with no images should not trigger image checks."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        mock_head.assert_not_called()
+        assert result.score == 0
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_data_uri_images_skipped(self, mock_head, mock_fetch, scoring_config):
+        """Data URI images should be skipped."""
+        mock_head.return_value = Mock(status_code=404)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<img src="data:image/png;base64,abc123"><img src="/photo.jpg"></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        # Only one HEAD call (for /photo.jpg), data URI skipped
+        assert mock_head.call_count == 1
+        broken_reasons = [r for r in result.reasons if r.startswith("broken_image_")]
+        assert len(broken_reasons) == 1
+
+
+class TestContactInfoScoring:
+    """Tests for contact info detection and scoring."""
+
+    @pytest.fixture(autouse=True)
+    def disable_playwright(self, scoring_config):
+        """Disable playwright fallback for unit tests."""
+        scoring_config.playwright_fallback_enabled = False
+
+    @patch("src.scoring.fetch_website")
+    def test_missing_email_adds_weight(self, mock_fetch, scoring_config):
+        """HTML with no email should add missing_email reason and weight."""
+        html = _BASE_HTML.replace(
+            '<a href="mailto:info@example.com">info@example.com</a>',
+            '<span>Contact us online</span>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "missing_email" in result.reasons
+        assert result.score == scoring_config.weight_missing_email
+
+    @patch("src.scoring.fetch_website")
+    def test_missing_phone_adds_weight(self, mock_fetch, scoring_config):
+        """HTML with no phone should add missing_phone reason and weight."""
+        html = _BASE_HTML.replace("(555) 123-4567", "our office")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "missing_phone" in result.reasons
+        assert result.score == scoring_config.weight_missing_phone
+
+    @patch("src.scoring.fetch_website")
+    def test_phone_mismatch_adds_weight(self, mock_fetch, scoring_config):
+        """If expected phone differs from website phone, add phone_mismatch."""
+        html = _BASE_HTML.replace("(555) 123-4567", "(555) 999-8888")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website(
+            "https://example.com", config=scoring_config, expected_phone="(555) 123-4567"
+        )
+
+        assert "phone_mismatch" in result.reasons
+        assert result.score == scoring_config.weight_phone_mismatch
+
+    @patch("src.scoring.fetch_website")
+    def test_phone_match_no_mismatch(self, mock_fetch, scoring_config):
+        """If expected phone matches website phone, no phone_mismatch."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = _BASE_HTML
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website(
+            "https://example.com", config=scoring_config, expected_phone="(555) 123-4567"
+        )
+
+        assert "phone_mismatch" not in result.reasons
+        assert "missing_phone" not in result.reasons
+        assert result.score == 0
+
+    @patch("src.scoring.fetch_website")
+    def test_missing_both_contact_signals_stack(self, mock_fetch, scoring_config):
+        """Missing both email and phone should stack weights."""
+        html = _BASE_HTML.replace("(555) 123-4567", "our office").replace(
+            '<a href="mailto:info@example.com">info@example.com</a>',
+            '<span>Contact us online</span>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "missing_email" in result.reasons
+        assert "missing_phone" in result.reasons
+        expected = scoring_config.weight_missing_email + scoring_config.weight_missing_phone
+        assert result.score == expected
+
+    @patch("src.scoring.fetch_website")
+    def test_no_expected_phone_skips_mismatch_check(self, mock_fetch, scoring_config):
+        """If no expected_phone provided, phone_mismatch should not be checked."""
+        html = _BASE_HTML.replace("(555) 123-4567", "(555) 999-8888")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "phone_mismatch" not in result.reasons
+        assert "missing_phone" not in result.reasons
+        assert result.score == 0
+
+
+class TestDeadSocialLinkScoring:
+    """Tests for dead social link detection and scoring."""
+
+    @pytest.fixture(autouse=True)
+    def disable_playwright(self, scoring_config):
+        """Disable playwright fallback for unit tests."""
+        scoring_config.playwright_fallback_enabled = False
+        scoring_config.dead_social_check_enabled = True
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_disabled_dead_social_check_skips_head_requests(
+        self,
+        mock_head,
+        mock_fetch,
+        scoring_config,
+    ):
+        """Launch config should be able to skip social-link probes."""
+        scoring_config.dead_social_check_enabled = False
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<a href="https://facebook.com/oldpage">Facebook</a></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        mock_head.assert_not_called()
+        assert not any(r.startswith("dead_social_link_") for r in result.reasons)
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_one_dead_social_link_adds_weight(self, mock_head, mock_fetch, scoring_config):
+        """A single dead social link should add weight and a reason."""
+        mock_head.return_value = Mock(status_code=404)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<a href="https://facebook.com/oldpage">Facebook</a></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert any(r.startswith("dead_social_link_") for r in result.reasons)
+        assert result.score == scoring_config.weight_dead_social_link
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_multiple_dead_social_links_stack(self, mock_head, mock_fetch, scoring_config):
+        """Multiple dead social links should stack their weights."""
+        mock_head.return_value = Mock(status_code=404)
+        html = _BASE_HTML.replace(
+            "</body>",
+            (
+                '<a href="https://facebook.com/old">FB</a>'
+                '<a href="https://instagram.com/old">IG</a>'
+                '</body>'
+            )
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        dead_reasons = [r for r in result.reasons if r.startswith("dead_social_link_")]
+        assert len(dead_reasons) == 2
+        assert result.score == 2 * scoring_config.weight_dead_social_link
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_working_social_link_no_score(self, mock_head, mock_fetch, scoring_config):
+        """A working social link should not add score."""
+        mock_head.return_value = Mock(status_code=200)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<a href="https://facebook.com/working">Facebook</a></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert not any(r.startswith("dead_social_link_") for r in result.reasons)
+        assert result.score == 0
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_non_social_links_ignored(self, mock_head, mock_fetch, scoring_config):
+        """Non-social links should not be checked."""
+        mock_head.return_value = Mock(status_code=404)
+        html = _BASE_HTML.replace(
+            "</body>",
+            '<a href="https://example.com/about">About</a></body>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        mock_head.assert_not_called()
+        assert not any(r.startswith("dead_social_link_") for r in result.reasons)
+
+    @patch("src.scoring.fetch_website")
+    @patch("src.scoring.requests.head")
+    def test_respects_max_check_limit(self, mock_head, mock_fetch, scoring_config):
+        """Only up to dead_social_max_check links should be checked."""
+        mock_head.return_value = Mock(status_code=404)
+        social_links = ""
+        for i in range(10):
+            social_links += f'<a href="https://facebook.com/page{i}">FB{i}</a>'
+        html = _BASE_HTML.replace("</body>", social_links + "</body>")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert mock_head.call_count == scoring_config.dead_social_max_check
+        dead_reasons = [r for r in result.reasons if r.startswith("dead_social_link_")]
+        assert len(dead_reasons) == scoring_config.dead_social_max_check
