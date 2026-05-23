@@ -201,7 +201,7 @@ def process_business(
         run_ctx.count_reasons(result.reasons)
 
         reasons_list = list(result.reasons)
-        lead_tier = compute_lead_tier(result.score)
+        lead_tier = compute_lead_tier(result.score, reasons_list)
         exclusive_until = None
         exclusive_tier = None
         if (

@@ -65,11 +65,11 @@ class ScoringConfig:
     weight_unreachable: int = 100
     weight_timeout: int = 90
     weight_5xx_error: int = 85
-    weight_ssl_error: int = 80
-    weight_parked_domain: int = 75
+    weight_ssl_error: int = 50
+    weight_parked_domain: int = 40
 
     # Quick-win signals
-    slow_response_ms_threshold: int = 5000
+    slow_response_ms_threshold: int = 3000
     weight_slow_response: int = 20
     redirect_chain_length_threshold: int = 3
     weight_redirect_chain: int = 15
@@ -77,9 +77,9 @@ class ScoringConfig:
     weight_last_modified_stale: int = 20
 
     # Medium signals (outdated tech, poor mobile)
-    weight_http_only: int = 30
+    weight_http_only: int = 50
     weight_client_error: int = 40
-    weight_not_found_or_forbidden: int = 50
+    weight_not_found_or_forbidden: int = 75
     weight_outdated_copyright: int = 25  # Copyright year > 2 years old
     weight_flash_detected: int = 40
     weight_missing_viewport: int = 20
@@ -87,7 +87,7 @@ class ScoringConfig:
     weight_missing_meta_description: int = 10
     weight_missing_h1: int = 8
     weight_generic_title: int = 10
-    weight_under_construction: int = 70
+    weight_under_construction: int = 30
 
     # Marketing spend indicators (businesses already paying for ads = hotter leads)
     weight_has_gtm: int = 15
@@ -97,6 +97,17 @@ class ScoringConfig:
     # SSL certificate expiry
     ssl_expiry_days_threshold: int = 30
     weight_ssl_expiry: int = 25
+
+    # WordPress detection
+    weight_wordpress_outdated: int = 40
+    wordpress_outdated_major: int = 6  # Major versions below this = outdated
+
+    # E-commerce platform detection
+    weight_ecommerce_platform: int = 15
+
+    # Render-blocking resource detection
+    weight_render_blocking: int = 10
+    render_blocking_threshold: int = 5  # Flag when blocking resource count >= this
 
     # Broken image detection
     broken_image_check_enabled: bool = field(
@@ -117,11 +128,11 @@ class ScoringConfig:
     weight_dead_social_link: int = 15
     dead_social_max_check: int = 5
 
-    # Weak signals (DIY builders - low weight to avoid false positives)
-    weight_wix: int = 5
-    weight_squarespace: int = 5
-    weight_weebly: int = 8
-    weight_godaddy_builder: int = 10
+    # Weak signals (DIY builders - stronger signal now: prime rebuild opportunities)
+    weight_wix: int = 30
+    weight_squarespace: int = 30
+    weight_weebly: int = 25
+    weight_godaddy_builder: int = 30
 
     # Soft exclusions / unknowns
     weight_bot_protection: int = 5

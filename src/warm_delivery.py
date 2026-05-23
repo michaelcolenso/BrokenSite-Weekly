@@ -78,7 +78,7 @@ def generate_warm_lead_csv(
             _sanitize_csv_value(lead.get("email", "")),
             _sanitize_csv_value(lead.get("audit_url", "")),
             _sanitize_csv_value(",".join(reasons_list)),
-            lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0)),
+            lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0), reasons),
             suggested_pitch_from_reasons(reasons),
             "yes" if has_marketing_pixel(reasons) else "no",
             _sanitize_csv_value(lead.get("exclusive_until", "")),

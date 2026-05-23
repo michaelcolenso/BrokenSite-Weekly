@@ -624,6 +624,87 @@ def _check_outdated_tech(html: str) -> List[str]:
     return outdated
 
 
+# E-commerce platform indicators (case-insensitive, in HTML or URL)
+_ECOMMERCE_PLATFORMS = {
+    "shopify": ["cdn.shopify.com", "myshopify.com", "shopify.com"],
+    "woocommerce": ["woocommerce", "wc-ajax", "/wp-content/plugins/woocommerce"],
+    "bigcommerce": ["bigcommerce.com", "cdn.bigcommerce.com", "bigcommerce.net"],
+    "magento": ["magento", "/skin/frontend/"],
+    "prestashop": ["prestashop", "/modules/prestashop"],
+    "squarespace_commerce": ["squarespace.com/commerce"],
+}
+
+
+def _detect_wordpress(html: str, url: str) -> Tuple[bool, Optional[str], bool]:
+    """Detect WordPress and extract version. Returns (is_wp, version, has_version)."""
+    html_lower = html.lower()
+
+    # Check generator meta tag
+    gen_match = re.search(
+        r'<meta\s+name=["\']generator["\'][^>]*content=["\']WordPress\s+(\d+\.\d+(?:\.\d+)?)',
+        html_lower,
+        re.IGNORECASE,
+    )
+    version = gen_match.group(1) if gen_match else None
+
+    wp_signals = [
+        "/wp-content/",
+        "/wp-includes/",
+        "wp-json",
+        "xmlrpc.php",
+    ]
+
+    is_wp = any(signal in html_lower for signal in wp_signals)
+
+    # Also check for version in enqueued assets
+    if is_wp and not version:
+        ver_match = re.search(
+            r'wp-(?:content|includes)[^"]*[?&]ver=(\d+\.\d+(?:\.\d+)?)',
+            html_lower,
+        )
+        if ver_match:
+            version = ver_match.group(1)
+
+    has_version = version is not None
+    return is_wp, version, has_version
+
+
+def _detect_ecommerce_platform(html: str, url: str) -> Optional[str]:
+    """Detect e-commerce platform. Returns platform name or None."""
+    html_lower = html.lower()
+    url_lower = url.lower()
+
+    for platform, patterns in _ECOMMERCE_PLATFORMS.items():
+        for pattern in patterns:
+            if pattern in html_lower or pattern in url_lower:
+                return platform
+    return None
+
+
+def _count_render_blocking(html: str) -> int:
+    """Count scripts and stylesheets in <head> that may block rendering."""
+    head_match = re.search(r"<head[^>]*>(.*?)</head>", html, re.IGNORECASE | re.DOTALL)
+    if not head_match:
+        return 0
+    head_content = head_match.group(1)
+
+    # Scripts without async/defer
+    scripts = re.findall(r"<script[^>]*>", head_content, re.IGNORECASE)
+    blocking_scripts = sum(
+        1 for s in scripts
+        if "async" not in s.lower() and "defer" not in s.lower()
+    )
+
+    # External stylesheets (all are render-blocking)
+    stylesheets = len(re.findall(
+        r'<link[^>]*rel=["\']stylesheet["\'][^>]*>',
+        head_content,
+        re.IGNORECASE,
+    ))
+
+    return blocking_scripts + stylesheets
+
+
 def fetch_website(
     url: str,
     config: ScoringConfig,
@@ -976,6 +1057,20 @@ def evaluate_website(
             score += 10
         reasons.append(f"outdated_{tech}")
 
+    # WordPress detection
+    is_wp, wp_version, wp_has_version = _detect_wordpress(html, final_url or url)
+    if is_wp:
+        reasons.append("wordpress")
+        if wp_has_version:
+            try:
+                parts = wp_version.split(".")
+                wp_major = int(parts[0])
+                if wp_major < config.wordpress_outdated_major:
+                    score += config.weight_wordpress_outdated
+                    reasons.append(f"wp_outdated_{wp_version}")
+            except (ValueError, IndexError):
+                pass
+
     # Broken images
     if config.broken_image_check_enabled:
         broken_count, broken_reasons = _check_broken_images(
@@ -1008,6 +1103,12 @@ def evaluate_website(
         score += weight
         reasons.append(f"diy_{diy_builder}")
 
+    # E-commerce platform detection
+    ecommerce = _detect_ecommerce_platform(html, final_url or url)
+    if ecommerce:
+        score += config.weight_ecommerce_platform
+        reasons.append(f"ecommerce_{ecommerce}")
+
     # Marketing spend indicators
     for signal in _detect_marketing_signals(html):
         if signal not in reasons:
@@ -1021,6 +1122,12 @@ def evaluate_website(
     if final_url and "gclid=" in final_url.lower() and "has_gclid" not in reasons:
         reasons.append("has_gclid")
         score += config.weight_has_gclid
+
+    # Render-blocking resources
+    render_blocking_count = _count_render_blocking(html)
+    if render_blocking_count >= config.render_blocking_threshold:
+        score += config.weight_render_blocking
+        reasons.append(f"render_blocking_{render_blocking_count}")
 
     # Contact info checks
     if html:

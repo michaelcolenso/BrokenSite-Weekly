@@ -12,8 +12,46 @@ from typing import Iterable, Optional
 MARKETING_SIGNAL_REASONS = {"has_gtm", "has_fb_pixel", "has_gclid"}
 
 
-def compute_lead_tier(score: int) -> str:
-    """Convert numeric score into a lead tier label."""
+def compute_lead_tier(score: int, reasons: Iterable[str] | None = None) -> str:
+    """Convert numeric score + signal context into a lead tier label.
+
+    Pure-score tiering is cheap but misleading: a parked domain (dead business)
+    can score 75 while a Wix site with Google Ads (prime rebuild opportunity)
+    might score only 35. This function layers signal awareness on top of the
+    raw score to surface leads most likely to convert.
+    """
+    reasons_set = set(parse_reasons(reasons)) if reasons else set()
+
+    # ── Dead / likely-out-of-business signals ──────────────────────────────
+    dead_signals = {"parked_domain", "dns_failed"}
+    if dead_signals & reasons_set:
+        return "skip"
+
+    # ── Under construction ─────────────────────────────────────────────────
+    # Usually a brand-new business (no budget yet) or abandoned project.
+    if "under_construction" in reasons_set:
+        return "cool"
+
+    # ── Composite upgrades ─────────────────────────────────────────────────
+    has_marketing = bool(MARKETING_SIGNAL_REASONS & reasons_set)
+    has_diy = any(r.startswith("diy_") for r in reasons_set)
+    has_wp_outdated = any(r.startswith("wp_outdated_") for r in reasons_set)
+    has_ecommerce = any(r.startswith("ecommerce_") for r in reasons_set)
+    has_no_https = "no_https" in reasons_set
+
+    # Marketing spend + bad platform = the hottest lead
+    if has_marketing and (has_diy or has_wp_outdated or has_no_https):
+        return "hot"
+
+    # E-commerce platform = higher-value rebuild
+    if has_ecommerce and score >= 40:
+        return "warm"
+
+    # Marketing spend alone bumps warm leads
+    if has_marketing and score >= 40:
+        return "warm"
+
+    # ── Base tier from score ───────────────────────────────────────────────
     if score >= 80:
         return "hot"
     if score >= 60:

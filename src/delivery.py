@@ -102,7 +102,7 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
             field: _sanitize_csv_value(lead.get(field, ""))
             for field in fieldnames
         }
-        row["lead_tier"] = lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0))
+        row["lead_tier"] = lead.get("lead_tier") or compute_lead_tier(int(lead.get("score") or 0), reasons)
         row["suggested_pitch"] = suggested_pitch_from_reasons(reasons)
         row["has_marketing_pixel"] = "yes" if has_marketing_pixel(reasons) else "no"
         row["reasons"] = _sanitize_csv_value(",".join(reasons_list))

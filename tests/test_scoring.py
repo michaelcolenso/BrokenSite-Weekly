@@ -17,6 +17,9 @@ from src.scoring import (
     _normalize_url,
     evaluate_website,
     evaluate_with_isolation,
+    _detect_wordpress,
+    _detect_ecommerce_platform,
+    _count_render_blocking,
 )
 from src.config import ScoringConfig
 
@@ -240,21 +243,22 @@ class TestScoringWeights:
         config = ScoringConfig()
         assert config.weight_timeout == 90
 
-    def test_ssl_error_weight_is_80(self):
+    def test_ssl_error_weight_is_50(self):
         config = ScoringConfig()
-        assert config.weight_ssl_error == 80
+        assert config.weight_ssl_error == 50
 
-    def test_parked_domain_weight_is_75(self):
+    def test_parked_domain_weight_is_40(self):
         config = ScoringConfig()
-        assert config.weight_parked_domain == 75
+        assert config.weight_parked_domain == 40
 
-    def test_http_only_weight_is_30(self):
+    def test_http_only_weight_is_50(self):
         config = ScoringConfig()
-        assert config.weight_http_only == 30
+        assert config.weight_http_only == 50
 
-    def test_wix_weight_is_low(self):
+    def test_wix_weight_is_moderate(self):
         config = ScoringConfig()
-        assert config.weight_wix <= 10  # Should be low to avoid false positives
+        # Wix is now a strong signal — prime rebuild opportunity
+        assert config.weight_wix >= 25
 
 
 class TestEvaluateWebsite:
@@ -464,8 +468,8 @@ class TestScoreThreshold:
         assert result.score >= scoring_config.min_score_to_include
 
     @patch("src.scoring.fetch_website")
-    def test_wix_alone_below_threshold(self, mock_fetch, scoring_config, sample_html_wix):
-        """A Wix site alone should NOT exceed the threshold (to avoid false positives)."""
+    def test_wix_now_exceeds_threshold(self, mock_fetch, scoring_config, sample_html_wix):
+        """A Wix site alone should now exceed the threshold (prime rebuild opportunity)."""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.url = "https://example.com"
@@ -474,10 +478,9 @@ class TestScoreThreshold:
 
         result = evaluate_website("https://example.com", config=scoring_config)
 
-        # Wix weight is 5, which alone should be below 40
-        # (unless there are other issues)
         assert "diy_wix" in result.reasons
-        # The score might include other signals, but Wix alone shouldn't push it over
+        # Wix (30) + likely missing email/phone signals should push above 40
+        assert result.score >= scoring_config.min_score_to_include
 
 
 _BASE_HTML = """<!DOCTYPE html>
@@ -1071,3 +1074,269 @@ class TestDeadSocialLinkScoring:
         assert mock_head.call_count == scoring_config.dead_social_max_check
         dead_reasons = [r for r in result.reasons if r.startswith("dead_social_link_")]
         assert len(dead_reasons) == scoring_config.dead_social_max_check
+
+
+class TestWordPressDetection:
+    """Tests for WordPress version detection."""
+
+    def test_detects_wordpress_from_wp_content(self):
+        html = '<link rel="stylesheet" href="/wp-content/themes/twentytwenty/style.css">'
+        is_wp, version, has_version = _detect_wordpress(html, "https://example.com")
+        assert is_wp is True
+
+    def test_detects_wordpress_from_wp_includes(self):
+        html = '<script src="/wp-includes/js/jquery.js"></script>'
+        is_wp, version, has_version = _detect_wordpress(html, "https://example.com")
+        assert is_wp is True
+
+    def test_detects_wp_version_from_asset_query(self):
+        html = '<link rel="stylesheet" href="/wp-content/themes/mytheme/style.css?ver=5.6.2">'
+        is_wp, version, has_version = _detect_wordpress(html, "https://example.com")
+        assert is_wp is True
+        assert version == "5.6.2"
+        assert has_version is True
+
+    def test_detects_wp_version_from_generator(self):
+        html = (
+            '<meta name="generator" content="WordPress 6.4.2">'
+            '<script src="/wp-includes/js/wp-embed.min.js"></script>'
+        )
+        is_wp, version, has_version = _detect_wordpress(html, "https://example.com")
+        assert is_wp is True
+        assert version == "6.4.2"
+
+    def test_normal_site_not_wordpress(self):
+        html = "<html><head><title>Custom Site</title></head><body></body></html>"
+        is_wp, version, has_version = _detect_wordpress(html, "https://example.com")
+        assert is_wp is False
+        assert version is None
+
+    @patch("src.scoring.fetch_website")
+    def test_outdated_wp_adds_weight_and_reason(self, mock_fetch, scoring_config):
+        """An outdated WordPress site should add wp_outdated reason and weight."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            (
+                '<meta name="generator" content="WordPress 5.8.3">'
+                '<link rel="stylesheet" href="/wp-content/themes/theme/style.css">'
+                '</head>'
+            )
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "wordpress" in result.reasons
+        assert any(r.startswith("wp_outdated_") for r in result.reasons)
+        assert result.score >= scoring_config.weight_wordpress_outdated
+
+    @patch("src.scoring.fetch_website")
+    def test_modern_wp_no_outdated_flag(self, mock_fetch, scoring_config):
+        """A modern WP site should get the wp tag but no outdated penalty."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            (
+                '<meta name="generator" content="WordPress 6.5.2">'
+                '<link rel="stylesheet" href="/wp-content/themes/theme/style.css">'
+                '</head>'
+            )
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "wordpress" in result.reasons
+        assert not any(r.startswith("wp_outdated_") for r in result.reasons)
+
+
+class TestEcommerceDetection:
+    """Tests for e-commerce platform detection."""
+
+    def test_detects_shopify(self):
+        html = '<script src="https://cdn.shopify.com/s/shopify.js"></script>'
+        result = _detect_ecommerce_platform(html, "https://example.com")
+        assert result == "shopify"
+
+    def test_detects_woocommerce(self):
+        html = '<link rel="stylesheet" href="/wp-content/plugins/woocommerce/assets/css/woocommerce.css">'
+        result = _detect_ecommerce_platform(html, "https://example.com")
+        assert result == "woocommerce"
+
+    def test_detects_bigcommerce(self):
+        html = '<script src="https://cdn.bigcommerce.com/main.js"></script>'
+        result = _detect_ecommerce_platform(html, "https://example.com")
+        assert result == "bigcommerce"
+
+    def test_detects_magento(self):
+        html = '<script src="/skin/frontend/base/js/magento.js"></script>'
+        result = _detect_ecommerce_platform(html, "https://example.com")
+        assert result == "magento"
+
+    def test_detects_in_url(self):
+        result = _detect_ecommerce_platform("<html></html>", "https://store.myshopify.com")
+        assert result == "shopify"
+
+    def test_returns_none_for_normal_site(self):
+        result = _detect_ecommerce_platform("<html></html>", "https://example.com")
+        assert result is None
+
+    @patch("src.scoring.fetch_website")
+    def test_ecommerce_adds_weight_and_reason(self, mock_fetch, scoring_config):
+        """E-commerce platform detection should add reason and weight."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            '<script src="https://cdn.shopify.com/shopify.js"></script></head>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert "ecommerce_shopify" in result.reasons
+        assert result.score >= scoring_config.weight_ecommerce_platform
+
+
+class TestRenderBlockingDetection:
+    """Tests for render-blocking resource counting."""
+
+    def test_counts_blocking_scripts_and_stylesheets(self):
+        html = """<html>
+        <head>
+            <script src="jquery.js"></script>
+            <script src="app.js"></script>
+            <link rel="stylesheet" href="main.css">
+            <link rel="stylesheet" href="theme.css">
+        </head>
+        <body></body>
+        </html>"""
+        count = _count_render_blocking(html)
+        assert count == 4
+
+    def test_async_and_defer_scripts_not_counted(self):
+        html = """<html>
+        <head>
+            <script src="jquery.js"></script>
+            <script async src="analytics.js"></script>
+            <script defer src="vendor.js"></script>
+        </head>
+        <body></body>
+        </html>"""
+        count = _count_render_blocking(html)
+        assert count == 1
+
+    def test_no_head_returns_zero(self):
+        html = "<html><body>No head!</body></html>"
+        count = _count_render_blocking(html)
+        assert count == 0
+
+    def test_empty_html_returns_zero(self):
+        count = _count_render_blocking("")
+        assert count == 0
+
+    @patch("src.scoring.fetch_website")
+    def test_render_blocking_below_threshold_no_score(self, mock_fetch, scoring_config):
+        """Few blocking resources should not add score."""
+        html = _BASE_HTML.replace(
+            "</head>",
+            '<script src="app.js"></script></head>'
+        )
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        assert not any(r.startswith("render_blocking_") for r in result.reasons)
+
+    @patch("src.scoring.fetch_website")
+    def test_many_blocking_resources_adds_weight(self, mock_fetch, scoring_config):
+        """Many blocking resources should add render_blocking reason."""
+        scripts = "".join(f'<script src="script{i}.js"></script>' for i in range(6))
+        html = _BASE_HTML.replace("</head>", scripts + "</head>")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.url = "https://example.com"
+        mock_response.text = html
+        mock_fetch.return_value = (mock_response, None)
+
+        result = evaluate_website("https://example.com", config=scoring_config)
+
+        blocking_reasons = [r for r in result.reasons if r.startswith("render_blocking_")]
+        assert len(blocking_reasons) == 1
+        assert result.score >= scoring_config.weight_render_blocking
+
+
+class TestCompositeTiering:
+    """Tests for composite lead tiering with signal awareness."""
+
+    def test_parked_domain_is_skip(self):
+        """Parked domains should be skipped regardless of score."""
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(85, ["parked_domain", "no_https"])
+        assert tier == "skip"
+
+    def test_under_construction_is_cool(self):
+        """Under construction sites should be capped at cool."""
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(75, ["under_construction"])
+        assert tier == "cool"
+
+    def test_dns_failed_is_skip(self):
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(95, ["dns_failed"])
+        assert tier == "skip"
+
+    def test_marketing_alone_bumps_score_40_to_warm(self):
+        """Marketing signals alone with score >= 40 bumps to warm."""
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(45, ["has_gtm"])
+        assert tier == "warm"
+
+    def test_ecommerce_with_score_40_is_warm(self):
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(45, ["ecommerce_shopify"])
+        assert tier == "warm"
+
+    def test_pure_score_hot(self):
+        """Score >= 80 with no composite signals still returns hot."""
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(85, ["ssl_error"])
+        assert tier == "hot"
+
+    def test_pure_score_warm(self):
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(65, ["no_https"])
+        assert tier == "warm"
+
+    def test_pure_score_cool(self):
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(50, ["missing_meta_description"])
+        assert tier == "cool"
+
+    def test_pure_score_skip(self):
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(20)
+        assert tier == "skip"
+
+    def test_no_reasons_uses_pure_score(self):
+        """When no reasons given, falls back to pure-score behavior."""
+        from src.lead_utils import compute_lead_tier
+        tier = compute_lead_tier(85)
+        assert tier == "hot"
+        tier = compute_lead_tier(55)
+        assert tier == "cool"
+        tier = compute_lead_tier(25)
+        assert tier == "skip"
