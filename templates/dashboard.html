@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="refresh" content="10" />
+  <title>BSW Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a; --card: #1e293b; --border: #334155;
+      --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8;
+      --hot: #ef4444; --warm: #f59e0b; --cool: #22c55e; --skip: #6b7280;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:var(--font); background:var(--bg); color:var(--text); padding:16px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:16px; }
+    .stat { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; }
+    .stat .value { font-size:28px; font-weight:800; }
+    .stat .label { font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); margin-top:2px; }
+    .hot { color:var(--hot); } .warm { color:var(--warm); } .cool { color:var(--cool); } .skip { color:var(--skip); }
+    h2 { font-size:14px; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted); margin-bottom:8px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:6px 10px; text-align:left; border-bottom:1px solid var(--border); }
+    th { font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); }
+    tr:hover { background:rgba(56,189,248,0.04); }
+    .log { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px 16px;
+           font-family:"SF Mono",Menlo,monospace; font-size:12px; line-height:1.6; max-height:400px; overflow-y:auto;
+           white-space:pre-wrap; word-break:break-all; color:var(--muted); }
+    .section { margin-bottom:16px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; }
+    .badge-running { background:#0c4a6e; color:#38bdf8; }
+    .badge-done { background:#064e3b; color:#34d399; }
+    .badge-failed { background:#450a0a; color:#f87171; }
+    .pulse { animation:pulse 2s infinite; }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+    .bar { height:6px; background:var(--border); border-radius:3px; margin-top:4px; overflow:hidden; }
+    .bar-fill { height:100%; background:var(--accent); border-radius:3px; transition:width 1s ease; }
+    .top-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+    .top-row h1 { font-size:20px; font-weight:700; }
+    .refreshing { font-size:11px; color:var(--muted); }
+    a { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+
+<div class="top-row">
+  <h1>⚡ BrokenSite Dashboard</h1>
+  <span class="refreshing">refreshes every 10s · {{ now }}</span>
+</div>
+
+<!-- Key stats -->
+<div class="grid">
+  <div class="stat">
+    <div class="value">{{ run_status }}</div>
+    <div class="label">Run Status</div>
+    {% if run_status == "running" %}<div class="bar"><div class="bar-fill pulse" style="width:100%"></div></div>{% endif %}
+  </div>
+  <div class="stat">
+    <div class="value">{{ total_leads }}</div>
+    <div class="label">Total Leads</div>
+  </div>
+  <div class="stat">
+    <div class="value">{{ qualifying_leads }}</div>
+    <div class="label">Qualifying (≥40)</div>
+  </div>
+  <div class="stat">
+    <div class="value">{{ runs_count }}</div>
+    <div class="label">Total Runs</div>
+  </div>
+  <div class="stat">
+    <div class="value">{{ last_run_duration }}</div>
+    <div class="label">Last Run Duration</div>
+  </div>
+</div>
+
+<!-- Current run -->
+{% if current_run %}
+<div class="section">
+  <h2>Current Run</h2>
+  <table>
+    <tr><td style="width:140px">Run ID</td><td>{{ current_run.run_id }}</td></tr>
+    <tr><td>Started</td><td>{{ current_run.started_at }}</td></tr>
+    <tr><td>Status</td><td><span class="badge badge-{{ current_run.status }}">{{ current_run.status }}</span></td></tr>
+    {% if current_run.queries_attempted %}
+    <tr><td>Queries</td><td>{{ current_run.queries_attempted }} attempted</td></tr>
+    {% endif %}
+    {% if current_run.businesses_found %}
+    <tr><td>Businesses</td><td>{{ current_run.businesses_found }} found</td></tr>
+    {% endif %}
+  </table>
+</div>
+{% endif %}
+
+<!-- Last completed run -->
+{% if last_completed %}
+<div class="section">
+  <h2>Last Completed Run</h2>
+  <table>
+    <tr><td style="width:140px">Run ID</td><td>{{ last_completed.run_id }}</td></tr>
+    <tr><td>Completed</td><td>{{ last_completed.completed_at }}</td></tr>
+    <tr><td>Queries</td><td>{{ last_completed.queries_attempted }} ({{ last_completed.businesses_found }} businesses)</td></tr>
+    <tr><td>Leads Exported</td><td>{{ last_completed.leads_exported }}</td></tr>
+    <tr><td>Emails Sent</td><td>{{ last_completed.emails_sent }}</td></tr>
+  </table>
+</div>
+{% endif %}
+
+<!-- Recent leads -->
+<div class="section">
+  <h2>Recent Leads</h2>
+  {% if recent_leads %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>City</th><th>Category</th><th>Score</th><th>Tier</th><th>Reasons</th></tr>
+    </thead>
+    <tbody>
+      {% for lead in recent_leads %}
+      <tr>
+        <td>
+          {% if lead.website %}
+          <a href="{{ lead.website }}" target="_blank">{{ lead.name or "—" }}</a>
+          {% else %}
+          {{ lead.name or "—" }}
+          {% endif %}
+        </td>
+        <td>{{ lead.city or "—" }}</td>
+        <td>{{ lead.category or "—" }}</td>
+        <td style="font-weight:700;" class="{% if lead.score >= 75 %}hot{% elif lead.score >= 40 %}warm{% else %}cool{% endif %}">{{ lead.score }}</td>
+        <td><span class="badge" style="background:var(--{{ lead.tier or 'skip' }});color:#fff;">{{ lead.tier or "skip" }}</span></td>
+        <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ lead.reasons or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted);padding:20px;">No leads yet.</p>
+  {% endif %}
+</div>
+
+<!-- Top signals -->
+{% if top_signals %}
+<div class="section">
+  <h2>Top Signals (all time)</h2>
+  <table>
+    <thead><tr><th>Signal</th><th>Count</th></tr></thead>
+    <tbody>
+      {% for sig, count in top_signals %}
+      <tr><td>{{ sig }}</td><td>{{ count }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- Log tail -->
+<div class="section">
+  <h2>Log Tail</h2>
+  <div class="log">{{ log_tail or "no log entries" }}</div>
+</div>
+
+</body>
+</html>

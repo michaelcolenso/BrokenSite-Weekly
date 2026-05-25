@@ -331,6 +331,119 @@ async def portal_download(filename: str, token: str = ""):
     return FileResponse(requested, media_type="text/csv")
 
 
+@app.get("/")
+@app.get("/dashboard")
+async def dashboard(request: Request):
+    """Operator dashboard showing run status, leads, and log tail."""
+    db = _get_db()
+
+    # Key stats
+    stats = db.get_stats()
+    total_leads = stats.get("total_leads", 0)
+    runs_count = stats.get("total_runs", 0)
+
+    # Current run + qualifying leads
+    current_run = None
+    qualifying = 0
+    recent_leads = []
+    top_signals = []
+    try:
+        with db._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM leads WHERE score >= 40").fetchone()
+            qualifying = row[0] if row else 0
+
+            rows = conn.execute(
+                "SELECT name, website, city, category, score, reasons, lead_tier "
+                "FROM leads ORDER BY last_seen DESC LIMIT 20"
+            ).fetchall()
+            recent_leads = [dict(r) for r in rows]
+
+            all_reasons = conn.execute(
+                "SELECT reasons FROM leads WHERE reasons IS NOT NULL AND reasons != ''"
+            ).fetchall()
+            from collections import Counter
+            counter = Counter()
+            for (reasons_str,) in all_reasons:
+                for r in reasons_str.split(","):
+                    r = r.strip()
+                    if r and not r.startswith("broken_image_") and not r.startswith("dead_social_link_"):
+                        counter[r] += 1
+            top_signals = counter.most_common(10)
+
+            current_row = conn.execute(
+                "SELECT run_id, started_at, status, queries_attempted, businesses_found "
+                "FROM runs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            if current_row:
+                current_run = dict(current_row)
+    except Exception:
+        pass
+
+    # Run status
+    last_run = stats.get("last_run", {})
+    run_status = last_run.get("status", "idle") if last_run else "idle"
+    if current_run:
+        run_status = "running"
+
+    # Last completed duration
+    last_completed = stats.get("last_completed_run")
+    last_run_duration = "—"
+    if last_completed:
+        completed_at = last_completed.get("completed_at")
+        started_at = last_completed.get("started_at")
+        if completed_at and started_at and isinstance(started_at, str) and isinstance(completed_at, str):
+            try:
+                from datetime import datetime as dt
+                start = dt.fromisoformat(started_at)
+                end = dt.fromisoformat(completed_at)
+                seconds = int((end - start).total_seconds())
+                if seconds >= 3600:
+                    last_run_duration = f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+                elif seconds >= 60:
+                    last_run_duration = f"{seconds // 60}m {seconds % 60}s"
+                else:
+                    last_run_duration = f"{seconds}s"
+            except Exception:
+                pass
+
+    # Log tail
+    log_tail = ""
+    try:
+        log_path = Path("/opt/brokensite-weekly/logs/brokensite-weekly.log")
+        if log_path.exists():
+            with open(log_path, "r") as f:
+                import os as _os
+                f.seek(0, _os.SEEK_END)
+                size = f.tell()
+                if size > 10000:
+                    f.seek(size - 10000)
+                else:
+                    f.seek(0)
+                f.readline()  # skip partial first line
+                lines = f.readlines()
+                log_tail = "".join(lines[-30:])
+    except Exception:
+        log_tail = "(could not read log)"
+
+    now = datetime.utcnow().strftime("%H:%M:%S UTC")
+
+    html = _render_template(
+        "dashboard.html",
+        now=now,
+        run_status=run_status,
+        total_leads=total_leads,
+        qualifying_leads=qualifying,
+        runs_count=runs_count,
+        last_run_duration=last_run_duration,
+        current_run=current_run,
+        last_completed=last_completed,
+        recent_leads=recent_leads,
+        top_signals=top_signals,
+        log_tail=log_tail,
+    )
+    return HTMLResponse(content=html, status_code=200)
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""

@@ -277,21 +277,21 @@ Low effort, immediate impact:
 
 **Validation**
 - [x] Add/extend unit tests for new scoring signals.
-- [ ] Run `--validate` mode to ensure no runtime regressions.
+- [x] Run `--validate` mode to ensure no runtime regressions.
 
 ### Phase 2: Core Improvements (Week 2-3)
 
 Medium effort, high value:
 
-- [ ] SSL certificate expiry check
-- [ ] Broken image detection
-- [ ] Missing contact info detection
-- [ ] SEO basics check (title, meta, h1)
-- [ ] Advertising spend detection (GTM/FB Pixel)
-- [ ] Expand "under construction" patterns
-- [ ] Fix database race condition
-- [ ] Fix Playwright resource leak
-- [ ] Add unit tests for scoring
+- [x] SSL certificate expiry check
+- [x] Broken image detection
+- [x] Missing contact info detection
+- [x] SEO basics check (title, meta, h1)
+- [x] Advertising spend detection (GTM/FB Pixel)
+- [x] Expand "under construction" patterns
+- [x] Fix database race condition
+- [x] Fix Playwright resource leak
+- [x] Add unit tests for scoring
 
 #### Phase 2 Detailed Task List (handoff-ready)
 
@@ -317,57 +317,57 @@ Medium effort, high value:
 
 Higher effort, differentiation:
 
-- [ ] Decision-maker name extraction
-- [ ] Competitor analysis
-- [ ] Phone mismatch detection (Maps vs website)
-- [ ] Dead social link checking
-- [ ] Lead tier classification
-- [ ] Pitch suggestion generation
-- [ ] Market saturation reports
+- [x] Decision-maker name extraction
+- [x] Competitor analysis
+- [x] Phone mismatch detection (Maps vs website)
+- [x] Dead social link checking
+- [x] Lead tier classification
+- [x] Pitch suggestion generation
+- [x] Market saturation reports
 
 #### Phase 3 Detailed Task List (handoff-ready)
 
 **Enrichment data sources**
-- [ ] Build HTML-based extractor for owner/decision-maker names from "About" and "Team" sections.
-- [ ] Implement competitor scraping from Maps: capture top 3 by reviews in same niche/city.
-- [ ] Add phone mismatch detection by normalizing and comparing Maps vs website numbers.
-- [ ] Add dead social link checks with HEAD/GET validation and timeouts.
+- [x] Build HTML-based extractor for owner/decision-maker names from "About" and "Team" sections.
+- [x] Implement competitor scraping from Maps: capture top 3 by reviews in same niche/city.
+- [x] Add phone mismatch detection by normalizing and comparing Maps vs website numbers.
+- [x] Add dead social link checks with HEAD/GET validation and timeouts.
 
 **Lead packaging**
-- [ ] Add lead tier classification (Hot/Warm/Cool/Skip) based on score ranges.
-- [ ] Implement pitch suggestion generator using detected issues; store suggested pitch text.
-- [ ] Add market saturation report generator to produce per-city/niche summaries.
+- [x] Add lead tier classification (Hot/Warm/Cool/Skip) based on score ranges.
+- [x] Implement pitch suggestion generator using detected issues; store suggested pitch text.
+- [x] Add market saturation report generator to produce per-city/niche summaries.
 
 **Exports**
-- [ ] Extend CSV schema with new enrichment fields and ensure DB schema includes columns.
-- [ ] Update email template to highlight tiers and top insights.
+- [x] Extend CSV schema with new enrichment fields and ensure DB schema includes columns.
+- [x] Update email template to highlight tiers and top insights.
 
 ### Phase 4: Product Expansion (Week 6+)
 
 New features:
 
-- [ ] Subscriber preferences system
-- [ ] Google PageSpeed API integration
-- [ ] Yelp cross-reference
-- [ ] Week-over-week change detection
-- [ ] Enhanced CSV output format
-- [ ] Weekly summary email
+- [x] Subscriber preferences system
+- [x] Google PageSpeed API integration
+- [x] Yelp cross-reference
+- [x] Week-over-week change detection
+- [x] Enhanced CSV output format
+- [x] Weekly summary email
 
 #### Phase 4 Detailed Task List (handoff-ready)
 
 **Subscriber personalization**
-- [ ] Add preference fields (niche include/exclude, cities, min review count) in subscriber model.
-- [ ] Filter lead export per subscriber based on preferences and tiers.
-- [ ] Add admin tooling to view/edit subscriber preferences.
+- [x] Add preference fields (niche include/exclude, cities, min review count) in subscriber model.
+- [x] Filter lead export per subscriber based on preferences and tiers.
+- [x] Add admin tooling to view/edit subscriber preferences.
 
 **External integrations**
-- [ ] Integrate Google PageSpeed API with caching and rate limiting.
-- [ ] Add Yelp lookup for business verification and enrichment.
+- [x] Integrate Google PageSpeed API with caching and rate limiting.
+- [x] Add Yelp lookup for business verification and enrichment (Playwright scraper, no API key required).
 
 **Product analytics**
-- [ ] Implement week-over-week change detection for lead status and scoring deltas.
-- [ ] Expand CSV output format to include enrichment, tiers, and pitch suggestions.
-- [ ] Add weekly summary email with aggregate metrics + highlights.
+- [x] Implement week-over-week change detection for lead status and scoring deltas.
+- [x] Expand CSV output format to include enrichment, tiers, and pitch suggestions.
+- [x] Add weekly summary email with aggregate metrics + highlights.
 
 ---
 
@@ -407,4 +407,4 @@ When implementing improvements:
 
 ---
 
-*Last updated: January 2026*
+*Last updated: March 2026*

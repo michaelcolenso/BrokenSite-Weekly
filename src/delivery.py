@@ -75,6 +75,7 @@ def generate_csv(leads: List[Dict[str, Any]], output_path: Path = None) -> tuple
         "lead_tier",
         "suggested_pitch",
         "has_marketing_pixel",
+        "owner_name",
         "exclusive_until",
         "place_id",
         "competitor_gap",

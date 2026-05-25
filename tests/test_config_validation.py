@@ -18,7 +18,9 @@ def test_validate_config_can_skip_all_external_requirements():
     assert errors == []
 
 
-def test_validate_config_requires_outreach_fields_when_enabled_for_mode():
+def test_validate_config_requires_outreach_fields_when_enabled_for_mode(monkeypatch):
+    monkeypatch.delenv("TRACKING_BASE_URL", raising=False)
+    monkeypatch.delenv("OUTREACH_PHYSICAL_ADDRESS", raising=False)
     config = Config()
     errors = validate_config(
         config,

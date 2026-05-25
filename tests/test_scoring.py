@@ -103,9 +103,10 @@ class TestParkedDomainDetection:
     def test_does_not_flag_normal_business(self, sample_html_modern):
         assert _check_parked_domain(sample_html_modern) is False
 
-    def test_detects_coming_soon(self):
+    def test_detects_coming_soon_as_under_construction(self):
         html = "<h1>Website Coming Soon</h1><p>Under construction</p>"
-        assert _check_parked_domain(html) is True
+        from src.scoring import _detect_under_construction
+        assert _detect_under_construction(html) is True
 
 
 class TestDIYBuilderDetection:

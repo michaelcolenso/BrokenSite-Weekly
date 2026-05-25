@@ -76,22 +76,54 @@ class SimpleResponse:
 
 # Parked domain indicators (case-insensitive)
 PARKED_INDICATORS = [
+    # Generic purchase intent
     "domain for sale",
     "this domain is for sale",
     "buy this domain",
+    "buy this domain now",
+    "purchase this domain",
+    "make an offer",
+    "acquire this domain",
+    # Parking services
     "domain parking",
     "parked domain",
+    "parked by",
+    "this domain is parked",
     "domain has expired",
-    "this site is under construction",
-    "website coming soon",
+    "domain expired",
+    "registration expired",
+    "this domain may be for sale",
+    # Hosting placeholder pages
     "future home of",
+    "placeholder page",
+    "default web page",
+    "apache2 ubuntu default page",
+    "congratulations! you've installed",  # default nginx/apache
+    "it works!",  # classic Apache default
+    "welcome to nginx",
+    "welcome to openresty",
+    "default landing page",
+    # GoDaddy / registrar
     "hostgator.com",
     "godaddy.com/domainsearch",
+    "godaddy.com/domains",
+    # Parking networks
     "sedoparking.com",
+    "sedo.com",
     "domainmarket.com",
     "hugedomains.com",
     "afternic.com",
     "dan.com/buy-domain",
+    "undeveloped.com",
+    "brandpa.com",
+    "squadhelp.com",
+    "parkingcrew.net",
+    "bodis.com",
+    "above.com",
+    "parklogic.com",
+    "namedrive.com",
+    "domainsponsor.com",
+    "trafficz.com",
 ]
 
 # DIY website builders (case-insensitive, in HTML source)
@@ -151,17 +183,65 @@ GENERIC_TITLE_PATTERNS = [
     r"^home$",
     r"^homepage$",
     r"^welcome$",
+    r"^welcome!$",
     r"^index$",
     r"^untitled$",
+    r"^untitled document$",
     r"^website$",
+    r"^my website$",
+    r"^my site$",
+    r"^new site$",
+    r"^default page$",
+    r"^page not found$",
+    r"^404$",
+    r"^test$",
+    r"^test page$",
+    r"^sample page$",
+    r"^hello world$",
+    r"^coming soon$",
+    r"^under construction$",
 ]
 
 UNDER_CONSTRUCTION_PATTERNS = [
+    # Generic under construction / coming soon
     "under construction",
+    "site under construction",
+    "page under construction",
+    "website under construction",
     "coming soon",
+    "launching soon",
+    "launching shortly",
+    "launching in",
     "site is being built",
     "website coming soon",
-    "launching soon",
+    "website is coming soon",
+    "we're coming soon",
+    "we are coming soon",
+    "stay tuned",
+    "be right back",
+    "we'll be right back",
+    "site offline for maintenance",
+    "temporarily offline",
+    # Maintenance mode (WordPress/SeedProd/Elementor maintenance)
+    "maintenance mode",
+    "in maintenance",
+    "down for maintenance",
+    "briefly unavailable for scheduled maintenance",
+    "wp_maintenance",
+    "seedprod",
+    "coming-soon-pro",
+    "beaver builder maintenance",
+    # GoDaddy / common hosting placeholders
+    "this site is coming soon",
+    "great things are coming",
+    "hello world",
+    "this is a placeholder page",
+    "this web page is parked",
+    "register a domain",
+    # Countdown timers are a strong under-construction signal
+    "days until launch",
+    "countdown to launch",
+    "countdown-to-launch",
 ]
 
 MARKETING_SIGNALS = {
@@ -656,6 +736,10 @@ def _detect_wordpress(html: str, url: str) -> Tuple[bool, Optional[str], bool]:
 
     is_wp = any(signal in html_lower for signal in wp_signals)
 
+    # Generator meta alone is sufficient to identify WordPress
+    if not is_wp and gen_match:
+        is_wp = True
+
     # Also check for version in enqueued assets
     if is_wp and not version:
         ver_match = re.search(
@@ -1088,6 +1172,16 @@ def evaluate_website(
         if dead_social_count > 0:
             score += dead_social_count * config.weight_dead_social_link
             reasons.extend(dead_social_reasons)
+
+    # Google PageSpeed Insights (opt-in, requires API key)
+    if config.pagespeed_enabled and config.pagespeed_api_key:
+        from .pagespeed import check_pagespeed
+        pagespeed_score, pagespeed_reason, _ = check_pagespeed(
+            final_url or url, config
+        )
+        if pagespeed_reason and pagespeed_reason.startswith("pagespeed_low_"):
+            score += config.weight_pagespeed_low
+            reasons.append(pagespeed_reason)
 
     # === Weak signals (low weight) ===
 

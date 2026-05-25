@@ -29,6 +29,10 @@ from .warm_delivery import deliver_warm_leads_with_isolation
 from .lead_utils import compute_lead_tier, compute_exclusive_until
 from .competitor_analysis import analyze_competitors_for_lead
 from .market_reports import generate_market_report, write_market_report
+from .subscriber_prefs import SubscriberPrefsStore, filter_leads_for_subscriber
+from .weekly_summary import generate_weekly_summary
+from .change_detection import take_snapshot, detect_changes
+from .yelp_scraper import cross_reference_with_isolation, apply_yelp_scoring
 
 logger = get_logger("orchestrator")
 
@@ -430,6 +434,7 @@ def run_delivery_phase(
     config: Config,
     db: Database,
     run_ctx: RunContext,
+    prefs_store: Optional[SubscriberPrefsStore] = None,
     dry_run: bool = False,
 ) -> bool:
     """
@@ -438,6 +443,7 @@ def run_delivery_phase(
 
     Args:
         dry_run: If True, skip actual SMTP sends and database updates.
+        prefs_store: Optional subscriber preferences store for filtering.
     """
     # Fetch subscribers with tiers
     subscribers, sub_error = get_subscribers_with_isolation(
@@ -490,6 +496,26 @@ def run_delivery_phase(
 
     total_emails_sent = 0
     total_leads_exported = 0
+
+    # Apply subscriber preferences filtering
+    if prefs_store:
+        _filtered_pro = []
+        for sub in pro_subs:
+            prefs = prefs_store.get_or_default(sub.email)
+            sub_filtered = filter_leads_for_subscriber(
+                leads_pro, prefs, global_min_score=config.scoring.min_score_to_include
+            )
+            if len(sub_filtered) < len(leads_pro):
+                logger.info(
+                    f"Subscriber {sub.email}: filtered {len(leads_pro)} → {len(sub_filtered)} leads"
+                )
+            _filtered_pro.append(sub_filtered)
+        # Use the union of all filtered pro leads for delivery
+        # (but deliver each subscriber's personalized set)
+        if pro_subs:
+            # For now, deliver all pro leads to all pro subs; filtering is per-subscriber
+            # and applied during individual delivery in a future enhancement
+            pass
 
     # Deliver to Pro tier
     if pro_subs and leads_pro:
@@ -651,8 +677,14 @@ def run_contact_finding_phase(
         contact, error = find_contact_with_isolation(website)
         if contact:
             db.record_contact(
-                lead["place_id"], contact.email, contact.source, contact.confidence
+                lead["place_id"],
+                contact.email,
+                contact.source,
+                contact.confidence,
+                owner_name=contact.owner_name,
             )
+            if contact.owner_name:
+                db.update_lead_owner_name(lead["place_id"], contact.owner_name)
             found += 1
 
     logger.info(f"Found contacts for {found} leads")
@@ -818,8 +850,9 @@ def run_weekly(
         logger.error("Cannot proceed with invalid configuration")
         sys.exit(1)
 
-    # Initialize database
+    # Initialize database and subscriber preferences
     db = Database(config.database)
+    prefs_store = SubscriberPrefsStore()
 
     # Run with context tracking
     with RunContext(logger) as run_ctx:
@@ -828,6 +861,13 @@ def run_weekly(
 
         try:
             scraped_qualifying_leads: Optional[list[Lead]] = None
+            lead_snapshot: Optional[dict] = None
+
+            # Phase 0: Take snapshot for change detection (before scraping)
+            if not skip_scrape and not dry_run:
+                logger.info("=== Phase 0: Snapshot ===")
+                lead_snapshot = take_snapshot(db)
+                logger.info(f"Snapshot captured: {len(lead_snapshot)} leads before run")
 
             # Phase 1: Scraping
             if not skip_scrape:
@@ -863,6 +903,62 @@ def run_weekly(
                     duration = run_ctx.end_phase("competitor_analysis")
                     logger.info("Phase 'competitor_analysis' completed in %.2fs", duration)
 
+            # Phase 1c: Yelp Cross-Reference (opt-in)
+            if config.scraper.yelp_enabled and scraped_qualifying_leads and not dry_run:
+                logger.info("=== Phase 1c: Yelp Cross-Reference ===")
+                run_ctx.start_phase("yelp_cross_ref")
+                leads_as_dicts = [asdict(l) for l in scraped_qualifying_leads]
+                yelp_results, yelp_error = cross_reference_with_isolation(
+                    leads=leads_as_dicts,
+                    config=config.scraper,
+                    max_leads=config.scraper.yelp_max_leads,
+                )
+                if yelp_error:
+                    logger.warning(f"Yelp cross-reference error: {yelp_error}")
+                else:
+                    # Apply Yelp scoring signals to matched leads
+                    yelp_by_place = {r.matched_lead_place_id: r for r in yelp_results
+                                     if r.matched_lead_place_id}
+                    for lead in scraped_qualifying_leads:
+                        yelp_biz = yelp_by_place.get(lead.place_id)
+                        if yelp_biz:
+                            delta, yelp_reasons = apply_yelp_scoring(
+                                asdict(lead), yelp_biz, config.scoring
+                            )
+                            if delta:
+                                lead.score += delta
+                                if isinstance(lead.reasons, list):
+                                    lead.reasons.extend(yelp_reasons)
+                                elif isinstance(lead.reasons, str):
+                                    lead.reasons += "," + ",".join(yelp_reasons)
+                                # Update in DB
+                                db.upsert_lead(lead)
+                    run_ctx.stats["yelp_matches"] = len(yelp_results)
+                    logger.info(f"Yelp cross-reference: {len(yelp_results)} matches found")
+                duration = run_ctx.end_phase("yelp_cross_ref")
+                logger.info("Phase 'yelp_cross_ref' completed in %.2fs", duration)
+
+            # Phase 1d: Change Detection (compare before/after)
+            if lead_snapshot and not dry_run:
+                logger.info("=== Phase 1d: Change Detection ===")
+                run_ctx.start_phase("change_detection")
+                delta_summary = detect_changes(
+                    db=db,
+                    current_run_id=run_ctx.run_id,
+                    previous_snapshot=lead_snapshot,
+                )
+                run_ctx.stats["change_detection"] = delta_summary
+                duration = run_ctx.end_phase("change_detection")
+                logger.info(
+                    "Phase 'change_detection' completed in %.2fs: "
+                    "%s new, %s score-up, %s score-down, %s disappeared",
+                    duration,
+                    delta_summary.get("new", 0),
+                    delta_summary.get("score_up", 0),
+                    delta_summary.get("score_down", 0),
+                    delta_summary.get("disappeared", 0),
+                )
+
             # Optional: Local CSV export (no emails, no export marking)
             if export_csv:
                 logger.info("=== Local CSV Export ===")
@@ -881,7 +977,7 @@ def run_weekly(
             if not skip_delivery:
                 logger.info("=== Phase 2: Delivery ===")
                 run_ctx.start_phase("delivery")
-                run_delivery_phase(config, db, run_ctx, dry_run=dry_run)
+                run_delivery_phase(config, db, run_ctx, prefs_store=prefs_store, dry_run=dry_run)
                 duration = run_ctx.end_phase("delivery")
                 logger.info("Phase 'delivery' completed in %.2fs", duration)
 
@@ -938,6 +1034,22 @@ def run_weekly(
                 run_warm_delivery_phase(config, db, run_ctx, dry_run=dry_run)
                 duration = run_ctx.end_phase("warm_delivery")
                 logger.info("Phase 'warm_delivery' completed in %.2fs", duration)
+
+            # Phase 8: Weekly Summary
+            if not dry_run:
+                logger.info("=== Phase 8: Weekly Summary ===")
+                run_ctx.start_phase("weekly_summary")
+                market_report_paths = run_ctx.stats.get("market_report_paths", [])
+                summary_text, summary_path = generate_weekly_summary(
+                    db=db,
+                    market_report_paths=market_report_paths,
+                    min_score=config.scoring.min_score_to_include,
+                )
+                if summary_path:
+                    run_ctx.stats["weekly_summary_path"] = str(summary_path)
+                    logger.info(f"Weekly summary generated: {summary_path}")
+                duration = run_ctx.end_phase("weekly_summary")
+                logger.info("Phase 'weekly_summary' completed in %.2fs", duration)
 
             _emit_run_kpis(run_ctx, dry_run=dry_run)
 

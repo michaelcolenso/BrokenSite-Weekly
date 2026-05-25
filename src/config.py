@@ -9,6 +9,21 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List
 
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _DOTENV_AVAILABLE = True
+except ImportError:
+    _DOTENV_AVAILABLE = False
+
+
+def _try_load_dotenv() -> None:
+    """Load .env file if python-dotenv is installed and .env exists."""
+    if not _DOTENV_AVAILABLE:
+        return
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.exists():
+        _load_dotenv(env_path)
+
 # Base paths
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 DATA_DIR = PROJECT_ROOT / "data"
@@ -48,6 +63,12 @@ class ScraperConfig:
     max_workers: int = field(default_factory=lambda: int(os.environ.get("SCRAPER_MAX_WORKERS", "5")))
     competitor_analysis_enabled: bool = field(
         default_factory=lambda: os.environ.get("COMPETITOR_ANALYSIS_ENABLED", "false").lower() == "true"
+    )
+    yelp_enabled: bool = field(
+        default_factory=lambda: os.environ.get("YELP_ENABLED", "false").lower() == "true"
+    )
+    yelp_max_leads: int = field(
+        default_factory=lambda: int(os.environ.get("YELP_MAX_LEADS", "25"))
     )
     screenshot_on_failure: bool = True
     html_dump_on_failure: bool = True
@@ -127,6 +148,21 @@ class ScoringConfig:
     )
     weight_dead_social_link: int = 15
     dead_social_max_check: int = 5
+
+    # Google PageSpeed Insights (opt-in, requires API key)
+    pagespeed_enabled: bool = field(
+        default_factory=lambda: os.environ.get("PAGESPEED_ENABLED", "false").lower() == "true"
+    )
+    pagespeed_api_key: str = field(
+        default_factory=lambda: os.environ.get("PAGESPEED_API_KEY", "")
+    )
+    pagespeed_score_threshold: int = 50  # Flag when performance score < this
+    weight_pagespeed_low: int = 25
+
+    # Yelp cross-reference scoring signals
+    weight_yelp_low_rating: int = 20  # Yelp rating < 3.0
+    weight_yelp_review_mismatch: int = 15  # Google vs Yelp review count > 3x ratio
+    yelp_low_rating_threshold: float = 3.0
 
     # Weak signals (DIY builders - stronger signal now: prime rebuild opportunities)
     weight_wix: int = 30
@@ -295,6 +331,8 @@ class Config:
 
 def load_config() -> Config:
     """Load configuration from environment variables."""
+    _try_load_dotenv()
+
     # Ensure directories exist
     for directory in [DATA_DIR, LOG_DIR, OUTPUT_DIR, DEBUG_DIR]:
         directory.mkdir(parents=True, exist_ok=True)

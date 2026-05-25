@@ -38,6 +38,7 @@ class Lead:
     exclusive_tier: Optional[str] = None
     lead_tier: Optional[str] = None
     competitors_json: Optional[str] = None
+    owner_name: Optional[str] = None
 
 
 SCHEMA = """
@@ -220,6 +221,8 @@ class Database:
             conn.execute("ALTER TABLE leads ADD COLUMN lead_tier TEXT")
         if "competitors_json" not in lead_columns:
             conn.execute("ALTER TABLE leads ADD COLUMN competitors_json TEXT")
+        if "owner_name" not in lead_columns:
+            conn.execute("ALTER TABLE leads ADD COLUMN owner_name TEXT")
 
         export_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(exports)").fetchall()
@@ -238,6 +241,12 @@ class Database:
             conn.execute("ALTER TABLE outreach ADD COLUMN followup_success BOOLEAN")
         if "followup_error" not in outreach_columns:
             conn.execute("ALTER TABLE outreach ADD COLUMN followup_error TEXT")
+
+        contact_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(contacts)").fetchall()
+        }
+        if "owner_name" not in contact_columns:
+            conn.execute("ALTER TABLE contacts ADD COLUMN owner_name TEXT")
 
     @contextmanager
     def _connect(self):
@@ -346,8 +355,8 @@ class Database:
                 INSERT INTO leads (
                     place_id, cid, name, website, address, phone,
                     review_count, city, category, score, reasons, first_seen, last_seen,
-                    exclusive_until, exclusive_tier, lead_tier, competitors_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    exclusive_until, exclusive_tier, lead_tier, competitors_json, owner_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(place_id) DO UPDATE SET
                     name = excluded.name,
                     website = excluded.website,
@@ -371,7 +380,7 @@ class Database:
                 lead.address, lead.phone, lead.review_count, lead.city, lead.category,
                 lead.score, reasons_json, now, now,
                 lead.exclusive_until, lead.exclusive_tier, lead.lead_tier,
-                lead.competitors_json, cutoff
+                lead.competitors_json, lead.owner_name, cutoff
             )).fetchone()
             return row is not None
 
@@ -381,6 +390,16 @@ class Database:
             conn.execute(
                 "UPDATE leads SET competitors_json = ? WHERE place_id = ?",
                 (competitors_json, place_id),
+            )
+
+    def update_lead_owner_name(self, place_id: str, owner_name: str) -> None:
+        """Update owner/decision-maker name for an existing lead."""
+        if not owner_name:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE leads SET owner_name = ? WHERE place_id = ?",
+                (owner_name, place_id),
             )
 
     def get_unexported_leads(
@@ -407,7 +426,7 @@ class Database:
                 rows = conn.execute("""
                     SELECT place_id, cid, name, website, address, phone, review_count,
                            city, category, score, reasons, first_seen, lead_tier,
-                           exclusive_until, exclusive_tier, competitors_json
+                           exclusive_until, exclusive_tier, competitors_json, owner_name
                     FROM leads
                     WHERE score >= ? AND website IS NOT NULL
                       AND exported_pro_at IS NULL
@@ -418,7 +437,7 @@ class Database:
                 rows = conn.execute("""
                     SELECT place_id, cid, name, website, address, phone, review_count,
                            city, category, score, reasons, first_seen, lead_tier,
-                           exclusive_until, exclusive_tier, competitors_json
+                           exclusive_until, exclusive_tier, competitors_json, owner_name
                     FROM leads
                     WHERE score >= ? AND website IS NOT NULL
                       AND exported_basic_at IS NULL
@@ -439,7 +458,7 @@ class Database:
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT place_id, cid, name, website, address, phone, review_count,
-                       city, category, score, reasons, first_seen
+                       city, category, score, reasons, first_seen, owner_name
                 FROM leads
                 WHERE reasons LIKE '%unverified%' AND exported_count = 0
                 ORDER BY score DESC, first_seen ASC
@@ -616,19 +635,26 @@ class Database:
 
     # ---- Contact Methods ----
 
-    def record_contact(self, place_id: str, email: str, source: str, confidence: float):
+    def record_contact(
+        self,
+        place_id: str,
+        email: str,
+        source: str,
+        confidence: float,
+        owner_name: Optional[str] = None,
+    ):
         """Record contact information for a lead."""
         with self._connect() as conn:
             conn.execute("""
-                INSERT OR REPLACE INTO contacts (place_id, email, source, confidence, found_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (place_id, email, source, confidence, datetime.utcnow()))
+                INSERT OR REPLACE INTO contacts (place_id, email, source, confidence, found_at, owner_name)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (place_id, email, source, confidence, datetime.utcnow(), owner_name))
 
     def get_contact(self, place_id: str) -> Optional[Dict[str, Any]]:
         """Get contact information for a lead."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT place_id, email, source, confidence, found_at FROM contacts WHERE place_id = ?",
+                "SELECT place_id, email, source, confidence, found_at, owner_name FROM contacts WHERE place_id = ?",
                 (place_id,)
             ).fetchone()
             return dict(row) if row else None
