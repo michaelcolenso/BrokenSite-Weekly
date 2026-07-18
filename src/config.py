@@ -238,6 +238,9 @@ class PortalConfig:
     secret: str = field(default_factory=lambda: os.environ.get("PORTAL_SECRET", ""))
     base_url: str = field(default_factory=lambda: os.environ.get("PORTAL_BASE_URL", os.environ.get("TRACKING_BASE_URL", "")))
     token_ttl_days: int = field(default_factory=lambda: int(os.environ.get("PORTAL_TOKEN_TTL_DAYS", "30")))
+    # Shared secret guarding the operator dashboard. When empty the dashboard
+    # is disabled (returns 403) so lead data and logs are never public.
+    dashboard_token: str = field(default_factory=lambda: os.environ.get("DASHBOARD_TOKEN", ""))
 
 
 @dataclass

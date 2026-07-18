@@ -82,3 +82,63 @@ def test_portal_download_rejects_sibling_path_with_output_prefix(
     )
 
     assert response.status_code == 400
+
+
+def _make_request():
+    """Minimal ASGI-style request stub for dashboard handler."""
+    class _Client:
+        host = "127.0.0.1"
+
+    class _Request:
+        client = _Client()
+        headers = {}
+
+    return _Request()
+
+
+def test_dashboard_disabled_when_no_token_configured(
+    tmp_path,
+    test_database,
+    monkeypatch,
+):
+    config = Config(
+        portal=PortalConfig(dashboard_token=""),
+        smtp=SMTPConfig(from_email="support@example.com"),
+    )
+    monkeypatch.setattr(tracking, "_get_db", lambda: test_database)
+    monkeypatch.setattr(tracking, "load_config", lambda: config)
+
+    response = asyncio.run(tracking.dashboard(_make_request(), token="anything"))
+    assert response.status_code == 403
+
+
+def test_dashboard_rejects_wrong_token(
+    tmp_path,
+    test_database,
+    monkeypatch,
+):
+    config = Config(
+        portal=PortalConfig(dashboard_token="s3cret"),
+        smtp=SMTPConfig(from_email="support@example.com"),
+    )
+    monkeypatch.setattr(tracking, "_get_db", lambda: test_database)
+    monkeypatch.setattr(tracking, "load_config", lambda: config)
+
+    response = asyncio.run(tracking.dashboard(_make_request(), token="wrong"))
+    assert response.status_code == 403
+
+
+def test_dashboard_allows_correct_token(
+    tmp_path,
+    test_database,
+    monkeypatch,
+):
+    config = Config(
+        portal=PortalConfig(dashboard_token="s3cret"),
+        smtp=SMTPConfig(from_email="support@example.com"),
+    )
+    monkeypatch.setattr(tracking, "_get_db", lambda: test_database)
+    monkeypatch.setattr(tracking, "load_config", lambda: config)
+
+    response = asyncio.run(tracking.dashboard(_make_request(), token="s3cret"))
+    assert response.status_code == 200

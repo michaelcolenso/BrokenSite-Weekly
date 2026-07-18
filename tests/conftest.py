@@ -22,6 +22,20 @@ from src.config import (
 from src.db import Database
 
 
+@pytest.fixture(autouse=True)
+def _no_live_ssl_probe(monkeypatch):
+    """Stop scoring's SSL-expiry check from doing live network I/O in tests.
+
+    `evaluate_website` opens a real TLS socket via `_check_ssl_expiry`, which
+    makes results depend on whatever certificate the test host's network
+    presents (in some environments a short-lived proxy cert trips the
+    `ssl_expires_*` signal). Default it to a no-op here; tests that exercise
+    SSL expiry explicitly `@patch("src.scoring._check_ssl_expiry")`, which
+    layers over this default.
+    """
+    monkeypatch.setattr("src.scoring._check_ssl_expiry", lambda *args, **kwargs: None)
+
+
 @pytest.fixture
 def scoring_config() -> ScoringConfig:
     """Default scoring configuration for tests."""

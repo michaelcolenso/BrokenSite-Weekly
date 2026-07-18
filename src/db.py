@@ -392,6 +392,26 @@ class Database:
                 (competitors_json, place_id),
             )
 
+    def update_lead_score(
+        self,
+        place_id: str,
+        score: int,
+        reasons: Optional[Iterable[str] | str] = None,
+    ) -> None:
+        """Update the score (and optionally reasons) for an existing lead.
+
+        Used by post-scoring phases (e.g. Yelp cross-reference) that adjust a
+        lead already written this run. `upsert_lead` intentionally treats a
+        same-run lead as a duplicate and skips the write, so those phases must
+        use this direct update to persist their signals.
+        """
+        reasons_json = self._serialize_reasons(reasons)
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE leads SET score = ?, reasons = ? WHERE place_id = ?",
+                (score, reasons_json, place_id),
+            )
+
     def update_lead_owner_name(self, place_id: str, owner_name: str) -> None:
         """Update owner/decision-maker name for an existing lead."""
         if not owner_name:
