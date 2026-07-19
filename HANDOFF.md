@@ -1,168 +1,156 @@
-# Mission Brief: BrokenSite-Weekly
+#BrokenSite-Weekly (BSW) — Execution Handoff
 
-> You're not just fixing code. You're building a money machine.
-
----
-
-## The Opportunity
-
-This is a **fully automated lead-generation system** that finds local businesses with broken, outdated, or neglected websites—and delivers them weekly to web developers who pay $50/month for these leads.
-
-**Current state:** Working MVP generating ~$1,000/month (20 subscribers).
-
-**Your mission:** Turn this into a $10,000/month operation.
-
-The bones are solid. The architecture is production-hardened. What it needs now is someone with **vision** and **hunger** to take it from "works" to "dominates."
+**Owner:** Michael Colenso
+**Repo:** `michaelcolenso/BrokenSite-Weekly` (Python)
+**Audience:** Coding agent (Claude Code or equivalent) executing with limited independent judgment. Follow this document literally. When this document and your own judgment conflict, follow this document and flag the conflict in your session summary. When something is genuinely ambiguous, STOP and ask Michael — do not improvise.
 
 ---
 
-## What You're Working With
+## 0. Mission and one-paragraph context
+
+BSW scans local business websites for objective technical breakage and packages the results as a weekly, per-metro lead list sold to web freelancers and agencies at $39/mo. The scanner and detection taxonomy are the product. Michael is NOT building a web agency and will NOT do automated outreach. The product is **data**, delivered weekly. Pilot metro: **Seattle, WA**. Validation gate: **5 paying subscribers in one metro** before any expansion.
+
+## 1. Hard rules (never violate)
+
+1. **No automated outreach.** Do not build, scaffold, or suggest cold-email senders, contact-form auto-submitters, LinkedIn bots, or SMS blasts. The system produces lists; a human decides what to do with them.
+2. **No anti-bot evasion.** Do not implement CAPTCHA solving, header/fingerprint spoofing beyond a single honest User-Agent, proxy rotation for evasion, or scraping of sites that block automated access. If a site blocks the scanner, skip it and record `status: blocked`.
+3. **Respect robots.txt** for every crawl. Cache robots.txt per domain for 24h.
+4. **Rate limits:** max 1 request per domain per 10 seconds; max 4 concurrent domains globally; total scan budget 2 requests/page, 3 pages/site (home, contact page if discoverable, one internal link).
+5. **User-Agent string:** `BSW-Scanner/1.0 (+https://brokensiteweekly.com/bot)` — honest, with a link to a bot info page (Task 4.3).
+6. **PII discipline:** collect only business-public data (business name, public phone, public address, website URL). No personal emails scraped from pages. No data resale beyond the subscription product.
+7. **Scope discipline:** anything not listed as P0 below is not built in v1. Add ideas to `PARKING-LOT.md`, do not build them.
+8. **Secrets** live in GitHub Actions secrets and Wrangler secrets only. Never commit keys. `.env.example` documents names only.
+9. **Do not delete or rewrite existing repo history.** Work on branch `v1-rebuild`, merge via PR.
+
+## 2. Architecture (target state)
 
 ```
-/home/user/BrokenSite-Weekly/
-├── src/
-│   ├── maps_scraper.py    # Playwright scrapes Google Maps
-│   ├── scoring.py         # Evaluates websites for "broken" signals
-│   ├── db.py              # SQLite persistence
-│   ├── delivery.py        # SMTP email with CSV attachments
-│   ├── gumroad.py         # Subscriber management
-│   └── run_weekly.py      # Orchestrates everything
-├── ROADMAP.md             # 42 improvements waiting to be built
-└── Claude.md              # Architecture deep-dive
+[GitHub Actions cron: Mondays 06:00 PT]
+        │
+        ▼
+[Python scanner (this repo)]
+  1. Load business list for metro (data/metros/seattle.csv)
+  2. Scan each domain (checks in §4)
+  3. Score + screenshot flagged sites
+  4. Emit results.json + screenshots/
+        │ POST (bearer token)
+        ▼
+[Cloudflare Worker (Hono) + D1]        [R2: screenshots]
+  - /ingest  (auth: bearer)
+  - /api/leads?metro=&week=  (auth: subscriber token)
+  - /report/:token  (HTML weekly report view)
+        │
+        ▼
+[Weekly email via Resend API] → subscribers with signed report link
 ```
 
-**How it works:**
-1. Every Sunday at 3am, scrapes Google Maps for local businesses (plumbers, dentists, etc.)
-2. Visits each website and scores it for "broken" signals (SSL errors, outdated copyright, no mobile, parked domains)
-3. Stores leads in SQLite, dedupes against 90-day window
-4. Emails CSV of high-scoring leads to paying Gumroad subscribers
+Business list source (P0): Washington Secretary of State corporations registry export filtered to active Seattle-area businesses with a website URL, supplemented by a one-time Google Places API pull for the top 20 consumer verticals (dentist, plumber, roofer, HVAC, landscaper, restaurant, salon, auto repair, electrician, remodeler, painter, movers, chiropractor, vet, gym, florist, locksmith, cleaner, accountant, law office). Target list size: 3,000–8,000 domains.
 
----
+## 3. Repo layout (create if missing)
 
-## What's Already Been Done
+```
+/scanner/
+  __init__.py
+  checks/           # one module per check, common interface
+  crawl.py          # fetch logic, robots, rate limiting
+  score.py          # severity scoring
+  screenshot.py     # Playwright, flagged sites only
+  emit.py           # results.json writer + POST to ingest
+/data/
+  metros/seattle.csv    # columns: business_name,vertical,phone,address,domain
+/worker/              # Hono app, wrangler.toml, D1 migrations
+/tests/
+/PARKING-LOT.md
+/HANDOFF.md           # this file
+```
 
-A comprehensive code review identified:
-- **14 bugs/code quality issues** (race conditions, resource leaks, security fixes)
-- **17 new scoring signals** to detect broken sites better
-- **12 data enrichment opportunities** (review counts, advertising detection, competitor analysis)
-- **8 product expansion ideas** (lead tiers, pitch suggestions, subscriber preferences)
+## 4. Detection checks (P0 — exactly these eight)
 
-All documented in `ROADMAP.md` with implementation priority.
+Each check returns `{check_id, triggered: bool, evidence: str, severity: int}`. A site is a **lead** if ≥1 check triggers.
 
----
+| # | check_id | Trigger condition | Severity |
+|---|----------|-------------------|----------|
+| 1 | `ssl_expired` | TLS cert expired or hostname mismatch on port 443 | 5 |
+| 2 | `no_https` | No 443 listener, or 443 unreachable while 80 serves | 4 |
+| 3 | `dead_form` | Contact form present whose `action` URL returns ≥400, or form posts to a missing endpoint (HEAD/GET check only — NEVER submit the form) | 5 |
+| 4 | `broken_pages` | ≥2 of 3 crawled pages return 404/500, or homepage itself 404/500/timeout | 5 |
+| 5 | `not_mobile` | No `<meta name="viewport">` on homepage | 3 |
+| 6 | `stale_copyright` | Footer copyright year ≤ 2021 (regex `(?:©|&copy;|\(c\))\s*(\d{4})`, take max year found) | 2 |
+| 7 | `broken_images` | ≥3 `<img>` on homepage whose `src` returns ≥400 (check max 10 images) | 3 |
+| 8 | `dead_cms` | Generator meta / asset paths reveal WordPress <5.0, Joomla <3.9, Drupal <8, or Flash embeds | 4 |
 
-## Your Mandate
+**Scoring:** lead severity = max(triggered severities) with +1 if ≥3 checks trigger (cap 5). Tier A = 5, Tier B = 4, Tier C = ≤3.
 
-### Think Like a Founder
+**Screenshots:** Playwright, homepage only, 1280×800, JPEG q70, only for Tier A/B leads. Store to R2 as `{week}/{domain}.jpg`.
 
-This isn't a coding exercise. This is a business. Every line of code should answer: **"Does this help subscribers close more deals?"**
+**Accuracy gate (blocking):** after first full Seattle scan, output `verification_sample.csv` with 50 random flagged sites. Michael manually verifies. If true-positive rate <90%, fix the failing check(s) and rescan before ANY Phase-2 work. Record the rate in `ACCURACY.md`.
 
-The subscribers are web developers and agencies. They're paying for leads. What makes a lead valuable?
-- **Actionable:** Clear problem they can pitch ("Your SSL expires in 12 days")
-- **Qualified:** Business can afford to pay ($$$, established, advertising already)
-- **Timely:** Right moment to reach out (new ownership, peak season coming)
-- **Exclusive:** Not the same list everyone else has
+## 5. Data contracts
 
-### Think Creatively
+**results.json (scanner → ingest):**
+```json
+{
+  "metro": "seattle",
+  "week": "2026-W31",
+  "scanned": 6412,
+  "leads": [{
+    "domain": "example.com",
+    "business_name": "Example Plumbing",
+    "vertical": "plumber",
+    "phone": "+12065551234",
+    "address": "123 Main St, Seattle, WA",
+    "checks": [{"check_id": "ssl_expired", "evidence": "expired 2025-11-02", "severity": 5}],
+    "tier": "A",
+    "screenshot_key": "2026-W31/example.com.jpg"
+  }]
+}
+```
 
-The current system finds "broken" sites. That's table stakes. What else indicates a business needs web help?
+**D1 tables:** `leads` (cols mirror above, PK domain+week), `subscribers` (email, token, metro, status, created_at), `scan_runs` (week, metro, scanned, lead_count, tp_rate NULLABLE).
 
-Ideas no one's explored yet:
-- **Businesses running Google Ads with broken sites** — literally burning money
-- **Competitors with better sites stealing their customers** — fear sells
-- **Reviews mentioning website problems** — "couldn't find hours online"
-- **Seasonal timing** — roofers need sites updated before spring rush
-- **New ownership signals** — "under new management" = rebrand opportunity
-- **Domain expiring soon** — WHOIS lookup, ultimate urgency
+## 6. Execution phases — do them in order, each gated
 
-What else? That's your job to figure out.
+### Phase 1 — Scanner + accuracy (gate: ≥90% TP)
+- [ ] 1.1 Build `crawl.py` (robots, rate limits, UA per §1)
+- [ ] 1.2 Implement the 8 checks with unit tests (fixture HTML per check, happy + negative case each)
+- [ ] 1.3 Build Seattle business list per §2; dedupe by domain; drop domains on national-chain blocklist (build a 100-entry blocklist: franchises/chains whose sites are corporate-managed)
+- [ ] 1.4 Full scan; emit results.json + verification_sample.csv
+- [ ] 1.5 STOP. Wait for Michael's verification pass.
 
-### Think at Scale
+### Phase 2 — Delivery pipeline (gate: end-to-end dry run works)
+- [ ] 2.1 Worker: `/ingest` (bearer), D1 migrations, R2 binding
+- [ ] 2.2 `/report/:token` HTML report: leads grouped by tier, screenshot thumbnails, CSV download link
+- [ ] 2.3 GitHub Actions workflow: Monday 06:00 PT, scan → POST → notify Michael on failure
+- [ ] 2.4 Resend email template: subject `Seattle broken-site leads — week of {date}`, body = counts by tier + report link. Send ONLY to addresses in `subscribers` table.
 
-20 subscribers × $50 = $1,000/month.
+### Phase 3 — Sell (Michael-led; agent supports only)
+- [ ] 3.1 Landing page (single HTML on Workers): one metro, one price ($39/mo), Stripe Payment Link (Michael creates the link — ask for it), sample redacted report embedded
+- [ ] 3.2 Bot info page at `/bot` explaining scanner purpose + opt-out email
+- [ ] 3.3 Generate `trades-cut.csv` each week: leads where vertical ∈ {roofer, plumber, HVAC, electrician, remodeler, painter, GC} — Michael's personal outreach list. Do not email anyone from it.
+- [ ] Gate: 5 paying subscribers OR 8 weeks elapsed.
 
-What gets us to 200 subscribers?
-- **Better leads** (higher quality = word of mouth)
-- **More niches** (lawyers? real estate agents? what verticals are underserved?)
-- **More cities** (currently 10 cities, there are 19,000+ cities in the US)
-- **Premium tiers** (exclusive leads? real-time alerts? CRM integration?)
-- **Agency partnerships** (white-label for marketing agencies?)
+### Phase 4 — Expand (only if gate passed)
+- One new metro per 5 subscribers, priority: Portland, Tacoma, Spokane. New metro = new CSV + config entry only; no code changes should be required (design Phase 1 accordingly).
 
-The marginal cost of adding subscribers is nearly zero. Same scrape, same email, infinite leverage.
+**Kill criteria (from Michael):** <3 subscribers and no traction after 8 weeks → archive product, keep scanner as a library for PainDex integration. Do not begin PainDex integration in v1.
 
----
+## 7. Non-goals (do not build in v1)
 
-## Where to Start
+Multi-metro dashboard; user accounts/login; Stripe API integration (Payment Link only); lead CRM features; historical trend charts; API for third parties; any AI-generated site audits or outreach copy; monitoring/uptime products. Log ideas to PARKING-LOT.md.
 
-### Quick Wins (Do These First)
+## 8. Definition of done (v1)
 
-These are already in the codebase, just need to be scored:
+- [ ] Monday cron produces a Seattle report with zero manual steps
+- [ ] Accuracy ≥90% documented in ACCURACY.md
+- [ ] Subscriber receives email ≤07:30 PT Monday with working report link
+- [ ] All secrets in Actions/Wrangler secrets; repo contains none
+- [ ] README updated with run instructions; this handoff kept current
+- [ ] Total infra cost ≤ $10/mo at pilot scale
 
-1. **`response_time_ms`** — Already captured but never scored. Slow sites = neglected hosting. Add 20 points for >5 seconds.
+## 9. Open questions for Michael (blocking marked ★)
 
-2. **`len(response.history)`** — Redirect chain length. 3+ redirects = messy DNS/migration. Add 15 points.
-
-3. **Review count extraction** — Already scraping Maps, just need to grab the "(127 reviews)" text. This is your #1 lead qualification signal.
-
-### High-Impact Features
-
-4. **Broken image detection** — Sample 5 images, HEAD request each. Broken images are *visible* problems = easy pitch for subscribers.
-
-5. **Advertising detection** — Check for Google Tag Manager, Facebook Pixel, `gclid` in URLs. If they're paying for ads but have a broken site, they're bleeding money. Hottest leads possible.
-
-6. **Pitch suggestion column** — Based on issues found, auto-generate an opening line: "I noticed your site's security certificate expires next week..." Subscribers will love this.
-
----
-
-## The Competitive Moat
-
-Right now, anyone could build this. Here's how to make it defensible:
-
-1. **Data compounding** — Track sites over time. "This site hasn't changed in 18 months" is more valuable than point-in-time scoring.
-
-2. **Feedback loops** — If subscribers could mark leads as "converted" or "junk", you'd build a training set to improve scoring.
-
-3. **Niche expertise** — Deep knowledge of what matters per vertical. A dentist's site needs different things than a plumber's.
-
-4. **Relationship data** — Track which leads each subscriber contacted. Never send the same lead twice. Manage territory.
-
-5. **Speed** — First to contact wins. Real-time alerts when a hot lead appears, not weekly batches.
-
----
-
-## Code Philosophy
-
-- **Don't over-engineer.** This runs once a week. It doesn't need microservices.
-- **Fail gracefully.** One bad business shouldn't crash the whole run.
-- **Log everything.** When it runs unattended on a VPS, logs are your eyes.
-- **Make it configurable.** Scoring weights in config, not hardcoded.
-- **Test the money path.** Scoring logic and delivery are critical. Everything else is nice-to-have.
-
----
-
-## Resources
-
-| File | Purpose |
-|------|---------|
-| `ROADMAP.md` | 42 prioritized improvements with implementation notes |
-| `Claude.md` | Architecture documentation |
-| `RUNBOOK.md` | Operations and troubleshooting |
-| `SETUP.md` | VPS deployment guide |
-
----
-
-## The Ask
-
-Be ambitious. Be creative. Be relentless.
-
-Don't just check boxes on the roadmap. Ask "what would make this 10x more valuable?" and build that.
-
-The best feature might not be on any list yet. It might be something you discover while digging through the code. Follow your curiosity. If you see an opportunity, chase it.
-
-Ship fast. Learn faster. Every improvement compounds.
-
-**Now go build something that prints money.**
-
----
-
-*Previous session: Completed code review, created ROADMAP.md with 42 improvements, committed to `claude/code-review-improvements-JikRF` branch.*
+1. ★ Confirm domain: brokensiteweekly.com or a subdomain of an existing property?
+2. ★ Stripe Payment Link URL (needed for 3.1).
+3. Resend account exists? If not, approve creating one (free tier suffices).
+4. Google Places API budget approval (~$50 one-time for list build) or WA SoS-only for v1?
+5. Preferred email for scanner opt-out requests?
