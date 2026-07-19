@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
-from jinja2 import Environment, FileSystemLoader, TemplateNotFound
+from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoescape
 
 from .config import PROJECT_ROOT, OUTPUT_DIR
 from .lead_utils import parse_reasons
@@ -239,7 +239,10 @@ def generate_audit_html(lead_data: Dict, tracking_base_url: str) -> Optional[str
             )
             return None
 
-        env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
+        env = Environment(
+            loader=FileSystemLoader(str(TEMPLATES_DIR)),
+            autoescape=select_autoescape(["html", "xml"]),
+        )
         template = env.get_template("audit.html")
 
         html = template.render(

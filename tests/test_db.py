@@ -156,6 +156,35 @@ class TestLeadUpsert:
 
         assert is_new is True
 
+    def test_update_lead_score_persists_same_run_adjustment(self, test_database):
+        """update_lead_score must overwrite score/reasons even within the dedupe
+        window, where upsert_lead intentionally skips the write."""
+        lead = Lead(
+            place_id="yelp_place_1",
+            cid=None,
+            name="Yelp Biz",
+            website="https://yelpbiz.com",
+            address=None,
+            phone=None,
+            city="Austin, TX",
+            category="plumber",
+            score=50,
+            reasons=["no_https"],
+            first_seen=datetime.utcnow(),
+            last_seen=datetime.utcnow(),
+        )
+        assert test_database.upsert_lead(lead) is True
+        # A second upsert in the same run is a no-op (duplicate within window).
+        assert test_database.upsert_lead(lead) is False
+
+        test_database.update_lead_score(
+            "yelp_place_1", 70, ["no_https", "yelp_low_rating"]
+        )
+
+        summary = test_database.get_lead_summary("yelp_place_1")
+        assert summary["score"] == 70
+        assert "yelp_low_rating" in summary["reasons"]
+
     def test_updates_existing_lead_outside_window(self, test_database, database_config):
         """Should update lead if last_seen is outside dedupe window."""
         old_time = datetime.utcnow() - timedelta(days=database_config.dedupe_window_days + 1)

@@ -4,6 +4,7 @@ FastAPI app that serves audit pages and tracks opens, page views, CTA clicks,
 and unsubscribes.
 """
 
+import hmac
 import os
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from jinja2 import Environment, FileSystemLoader, TemplateNotFound
+from jinja2 import Environment, FileSystemLoader, TemplateNotFound, select_autoescape
 
 from .config import OUTPUT_DIR, PROJECT_ROOT, load_config
 from .db import Database
@@ -36,7 +37,10 @@ def _get_jinja_env() -> Environment:
     """Get or create Jinja2 environment."""
     global _jinja_env
     if _jinja_env is None:
-        _jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
+        _jinja_env = Environment(
+            loader=FileSystemLoader(str(TEMPLATES_DIR)),
+            autoescape=select_autoescape(["html", "xml"]),
+        )
     return _jinja_env
 
 
@@ -333,8 +337,30 @@ async def portal_download(filename: str, token: str = ""):
 
 @app.get("/")
 @app.get("/dashboard")
-async def dashboard(request: Request):
-    """Operator dashboard showing run status, leads, and log tail."""
+async def dashboard(request: Request, token: str = ""):
+    """Operator dashboard showing run status, leads, and log tail.
+
+    Gated behind DASHBOARD_TOKEN. The dashboard exposes the lead database and
+    a tail of the server log, so it must never be reachable without the shared
+    secret. When the token is unset the dashboard is disabled entirely.
+    """
+    config = load_config()
+    expected = config.portal.dashboard_token
+    if not expected:
+        return _render_error_page(
+            title="Dashboard disabled",
+            message="The operator dashboard is not enabled. Set DASHBOARD_TOKEN to use it.",
+            from_email=config.smtp.from_email,
+            status_code=403,
+        )
+    if not token or not hmac.compare_digest(token, expected):
+        return _render_error_page(
+            title="Not authorized",
+            message="A valid dashboard token is required.",
+            from_email=config.smtp.from_email,
+            status_code=403,
+        )
+
     db = _get_db()
 
     # Key stats

@@ -931,8 +931,12 @@ def run_weekly(
                                     lead.reasons.extend(yelp_reasons)
                                 elif isinstance(lead.reasons, str):
                                     lead.reasons += "," + ",".join(yelp_reasons)
-                                # Update in DB
-                                db.upsert_lead(lead)
+                                # Persist the adjusted score. upsert_lead would
+                                # treat this same-run lead as a duplicate and
+                                # skip the write, so update the row directly.
+                                db.update_lead_score(
+                                    lead.place_id, lead.score, lead.reasons
+                                )
                     run_ctx.stats["yelp_matches"] = len(yelp_results)
                     logger.info(f"Yelp cross-reference: {len(yelp_results)} matches found")
                 duration = run_ctx.end_phase("yelp_cross_ref")
