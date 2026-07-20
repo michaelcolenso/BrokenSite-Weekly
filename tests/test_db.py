@@ -131,6 +131,70 @@ class TestDatabaseInitialization:
         finally:
             db.close()
 
+    def test_normalizes_legacy_mixed_case_suppression_rows(self, tmp_path):
+        """Rows written before email normalization was added must still match
+        the now-lowercased is_suppressed()/outreach lookups, otherwise a
+        previously-suppressed contact would silently start receiving mail
+        again after upgrading."""
+        db_path = tmp_path / "legacy_suppression.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE suppression (
+                    email TEXT PRIMARY KEY,
+                    reason TEXT,
+                    suppressed_at TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO suppression (email, reason, suppressed_at) VALUES (?, ?, ?)",
+                ("User@Biz.com", "unsubscribed", datetime(2026, 1, 1)),
+            )
+
+        db = Database(DatabaseConfig(db_path=db_path))
+        try:
+            assert db.is_suppressed("user@biz.com") is True
+            assert db.is_suppressed("User@Biz.com") is True
+
+            with db._connect() as conn:
+                rows = conn.execute("SELECT email FROM suppression").fetchall()
+            assert [r["email"] for r in rows] == ["user@biz.com"]
+        finally:
+            db.close()
+
+    def test_normalize_suppression_dedupes_case_only_duplicates(self, tmp_path):
+        """If both cased variants exist pre-migration, keep the most recent."""
+        db_path = tmp_path / "legacy_suppression_dupe.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE suppression (
+                    email TEXT PRIMARY KEY,
+                    reason TEXT,
+                    suppressed_at TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO suppression (email, reason, suppressed_at) VALUES (?, ?, ?)",
+                ("User@Biz.com", "old_reason", datetime(2026, 1, 1)),
+            )
+            conn.execute(
+                "INSERT INTO suppression (email, reason, suppressed_at) VALUES (?, ?, ?)",
+                ("user@biz.com", "unsubscribed", datetime(2026, 6, 1)),
+            )
+
+        db = Database(DatabaseConfig(db_path=db_path))
+        try:
+            with db._connect() as conn:
+                rows = conn.execute("SELECT email, reason FROM suppression").fetchall()
+            assert len(rows) == 1
+            assert rows[0]["email"] == "user@biz.com"
+            assert rows[0]["reason"] == "unsubscribed"
+        finally:
+            db.close()
+
 
 class TestLeadUpsert:
     """Tests for lead upsert operations."""

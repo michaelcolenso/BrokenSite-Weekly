@@ -200,6 +200,7 @@ class Database:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
             self._ensure_columns(conn)
+            self._normalize_suppression_emails(conn)
             logger.info(f"Database initialized at {self.db_path}")
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
@@ -247,6 +248,44 @@ class Database:
         }
         if "owner_name" not in contact_columns:
             conn.execute("ALTER TABLE contacts ADD COLUMN owner_name TEXT")
+
+    def _normalize_suppression_emails(self, conn: sqlite3.Connection) -> None:
+        """One-time migration: lowercase suppression.email for rows written
+        before add_suppression()/is_suppressed() normalized casing.
+
+        suppression.email is the primary key, and lookups now always
+        lowercase the input; a pre-existing mixed-case row would silently
+        stop matching and its suppression would be lost. Collapse any
+        case-only duplicates by keeping the most recently suppressed row.
+        """
+        rows = conn.execute(
+            "SELECT email, reason, suppressed_at FROM suppression"
+        ).fetchall()
+        if not rows:
+            return
+
+        needs_migration = any((row["email"] or "") != (row["email"] or "").strip().lower() for row in rows)
+        if not needs_migration:
+            return
+
+        latest_by_email: Dict[str, sqlite3.Row] = {}
+        for row in rows:
+            lowered = (row["email"] or "").strip().lower()
+            if not lowered:
+                continue
+            existing = latest_by_email.get(lowered)
+            if existing is None or (row["suppressed_at"] or datetime.min) > (existing["suppressed_at"] or datetime.min):
+                latest_by_email[lowered] = row
+
+        conn.execute("DELETE FROM suppression")
+        conn.executemany(
+            "INSERT INTO suppression (email, reason, suppressed_at) VALUES (?, ?, ?)",
+            [(email, row["reason"], row["suppressed_at"]) for email, row in latest_by_email.items()],
+        )
+        logger.info(
+            f"Normalized {len(rows)} suppression row(s) to lowercase email keys "
+            f"({len(latest_by_email)} unique after dedupe)"
+        )
 
     @contextmanager
     def _connect(self):
