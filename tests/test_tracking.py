@@ -142,3 +142,23 @@ def test_dashboard_allows_correct_token(
 
     response = asyncio.run(tracking.dashboard(_make_request(), token="s3cret"))
     assert response.status_code == 200
+
+
+def test_unsubscribe_endpoint_suppresses_contact_email(
+    test_database,
+    monkeypatch,
+):
+    """The /unsubscribe/{place_id} handler must suppress the contact's email
+    (not just the place_id), so a shared email across multiple place_ids
+    (e.g. multi-location businesses) is fully suppressed after one click."""
+    test_database.record_contact("place1", "owner@biz.com", "mailto", 0.9)
+
+    config = Config(smtp=SMTPConfig(from_email="support@example.com"))
+    monkeypatch.setattr(tracking, "_get_db", lambda: test_database)
+    monkeypatch.setattr(tracking, "load_config", lambda: config)
+
+    response = asyncio.run(tracking.unsubscribe("place1", _make_request()))
+
+    assert response.status_code == 200
+    assert test_database.is_unsubscribed("place1") is True
+    assert test_database.is_suppressed("owner@biz.com") is True
