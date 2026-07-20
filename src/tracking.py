@@ -20,6 +20,7 @@ from .db import Database
 from .gumroad import get_subscribers_with_isolation
 from .delivery import send_email
 from .portal_auth import verify_portal_token
+from .rate_limit import SlidingWindowLimiter
 from .logging_setup import get_logger
 
 logger = get_logger("tracking")
@@ -28,6 +29,22 @@ app = FastAPI(title="BrokenSite Tracking", docs_url=None, redoc_url=None)
 
 AUDITS_DIR = OUTPUT_DIR / "audits"
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
+
+# Engagement events (pixel opens, audit page views, CTA clicks) are
+# unauthenticated and directly feed get_engagement_score()/get_warm_leads(),
+# so a naive refresh-spam script could otherwise inflate a lead into "warm"
+# tier. Dedupe repeats of the same event from the same IP within this window.
+ENGAGEMENT_EVENT_DEDUPE_WINDOW_SECONDS = 60
+_engagement_event_limiter = SlidingWindowLimiter()
+
+# The CTA POST endpoint has higher amplification cost than plain tracking: it
+# writes a full inquiry record and emails every pro subscriber, so it gets
+# its own tighter, IP-scoped limit independent of the engagement dedupe above.
+CTA_SUBMIT_MAX_PER_WINDOW = 5
+CTA_SUBMIT_WINDOW_SECONDS = 3600
+CTA_FIELD_MAX_LENGTH = 200
+CTA_NOTES_MAX_LENGTH = 2000
+_cta_submit_limiter = SlidingWindowLimiter()
 
 # Jinja2 template environment
 _jinja_env = None
@@ -83,10 +100,22 @@ def _get_db() -> Database:
 
 
 def _record_event(place_id: str, event_type: str, request: Request):
-    """Record a tracking event to the database."""
+    """Record a tracking event to the database.
+
+    Deduplicates repeats of the same (ip, place_id, event_type) within
+    ENGAGEMENT_EVENT_DEDUPE_WINDOW_SECONDS so a refresh-spam script can't
+    trivially inflate engagement scores. Best-effort only — see rate_limit.py.
+    """
     try:
-        db = _get_db()
         ip_address = request.client.host if request.client else None
+        dedupe_key = f"{event_type}:{place_id}:{ip_address or 'unknown'}"
+        if not _engagement_event_limiter.allow(
+            dedupe_key, max_events=1, window_seconds=ENGAGEMENT_EVENT_DEDUPE_WINDOW_SECONDS
+        ):
+            logger.debug(f"Deduped {event_type} for {place_id} from {ip_address}")
+            return
+
+        db = _get_db()
         user_agent = request.headers.get("user-agent", "")
         db.record_event(
             place_id=place_id,
@@ -212,10 +241,33 @@ async def track_cta_submit(
     phone: str = Form(""),
     notes: str = Form(""),
 ):
-    """Handle CTA form submission."""
+    """Handle CTA form submission.
+
+    Unauthenticated and fans out an email to every pro subscriber per
+    submission, so it carries its own tighter, IP-scoped rate limit beyond
+    the general engagement-event dedupe in _record_event().
+    """
     _record_event(place_id, "cta_click", request)
+
+    ip_address = request.client.host if request.client else "unknown"
+    if not _cta_submit_limiter.allow(
+        f"cta_submit:{ip_address}", CTA_SUBMIT_MAX_PER_WINDOW, CTA_SUBMIT_WINDOW_SECONDS
+    ):
+        logger.warning(f"CTA submission rate limit exceeded for {ip_address}")
+        config = load_config()
+        return _render_error_page(
+            title="Too many requests",
+            message="You've submitted this form a few times recently. Please try again later.",
+            from_email=config.smtp.from_email,
+            status_code=429,
+        )
+
     try:
         db = _get_db()
+        name = name[:CTA_FIELD_MAX_LENGTH]
+        email = email[:CTA_FIELD_MAX_LENGTH]
+        phone = phone[:CTA_FIELD_MAX_LENGTH]
+        notes = notes[:CTA_NOTES_MAX_LENGTH]
         db.record_lead_inquiry(place_id, name, email, phone, notes)
         _send_inquiry_notifications(place_id, name, email, phone, notes)
     except Exception as e:
