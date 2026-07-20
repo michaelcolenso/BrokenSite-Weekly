@@ -200,6 +200,7 @@ class Database:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
             self._ensure_columns(conn)
+            self._normalize_suppression_emails(conn)
             logger.info(f"Database initialized at {self.db_path}")
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
@@ -247,6 +248,44 @@ class Database:
         }
         if "owner_name" not in contact_columns:
             conn.execute("ALTER TABLE contacts ADD COLUMN owner_name TEXT")
+
+    def _normalize_suppression_emails(self, conn: sqlite3.Connection) -> None:
+        """One-time migration: lowercase suppression.email for rows written
+        before add_suppression()/is_suppressed() normalized casing.
+
+        suppression.email is the primary key, and lookups now always
+        lowercase the input; a pre-existing mixed-case row would silently
+        stop matching and its suppression would be lost. Collapse any
+        case-only duplicates by keeping the most recently suppressed row.
+        """
+        rows = conn.execute(
+            "SELECT email, reason, suppressed_at FROM suppression"
+        ).fetchall()
+        if not rows:
+            return
+
+        needs_migration = any((row["email"] or "") != (row["email"] or "").strip().lower() for row in rows)
+        if not needs_migration:
+            return
+
+        latest_by_email: Dict[str, sqlite3.Row] = {}
+        for row in rows:
+            lowered = (row["email"] or "").strip().lower()
+            if not lowered:
+                continue
+            existing = latest_by_email.get(lowered)
+            if existing is None or (row["suppressed_at"] or datetime.min) > (existing["suppressed_at"] or datetime.min):
+                latest_by_email[lowered] = row
+
+        conn.execute("DELETE FROM suppression")
+        conn.executemany(
+            "INSERT INTO suppression (email, reason, suppressed_at) VALUES (?, ?, ?)",
+            [(email, row["reason"], row["suppressed_at"]) for email, row in latest_by_email.items()],
+        )
+        logger.info(
+            f"Normalized {len(rows)} suppression row(s) to lowercase email keys "
+            f"({len(latest_by_email)} unique after dedupe)"
+        )
 
     @contextmanager
     def _connect(self):
@@ -718,6 +757,10 @@ class Database:
         """
         Get leads that have audit + contact but haven't been contacted and aren't unsubscribed.
         Only returns leads with confidence >= min_confidence.
+
+        Excludes leads whose place_id was unsubscribed directly, as well as
+        leads whose contact email is suppressed (e.g. because the same
+        business owner unsubscribed via a different place_id/location).
         """
         with self._connect() as conn:
             rows = conn.execute("""
@@ -729,17 +772,23 @@ class Database:
                 INNER JOIN contacts c ON l.place_id = c.place_id
                 LEFT JOIN outreach o ON l.place_id = o.place_id
                 LEFT JOIN unsubscribes u ON l.place_id = u.place_id
+                LEFT JOIN suppression s ON s.email = c.email
                 WHERE l.score >= ?
                   AND c.confidence >= ?
                   AND o.place_id IS NULL
                   AND u.place_id IS NULL
+                  AND s.email IS NULL
                 ORDER BY l.score DESC, c.confidence DESC
             """, (min_score, min_confidence)).fetchall()
 
             return [dict(row) for row in rows]
 
     def get_leads_for_followup(self, min_days_since_sent: int = 3) -> List[Dict[str, Any]]:
-        """Get leads eligible for follow-up (no engagement, no unsubscribe)."""
+        """Get leads eligible for follow-up (no engagement, no unsubscribe).
+
+        Excludes leads whose contact email is suppressed, in addition to
+        place_id-level unsubscribes (see get_leads_ready_for_outreach).
+        """
         cutoff = datetime.utcnow() - timedelta(days=min_days_since_sent)
         with self._connect() as conn:
             rows = conn.execute("""
@@ -751,11 +800,13 @@ class Database:
                 INNER JOIN contacts c ON l.place_id = c.place_id
                 INNER JOIN audits a ON l.place_id = a.place_id
                 LEFT JOIN unsubscribes u ON l.place_id = u.place_id
+                LEFT JOIN suppression s ON s.email = c.email
                 LEFT JOIN engagement_events e ON l.place_id = e.place_id
                 WHERE o.success = 1
                   AND o.followup_sent_at IS NULL
                   AND o.sent_at <= ?
                   AND u.place_id IS NULL
+                  AND s.email IS NULL
                   AND e.place_id IS NULL
             """, (cutoff,)).fetchall()
             return [dict(row) for row in rows]
@@ -795,13 +846,26 @@ class Database:
         """
         Calculate engagement score for a lead.
         Weights: email_opened=5, page_view=25, cta_click=50, unsubscribe=-100
+
+        A lead counts as unsubscribed either because its own place_id was
+        unsubscribed, or because its contact email is suppressed (e.g. the
+        same business owner unsubscribed via a different place_id/location).
         """
         with self._connect() as conn:
-            # Check if unsubscribed first
             unsubscribed = conn.execute(
                 "SELECT 1 FROM unsubscribes WHERE place_id = ?",
                 (place_id,)
             ).fetchone()
+            if not unsubscribed:
+                contact = conn.execute(
+                    "SELECT email FROM contacts WHERE place_id = ?",
+                    (place_id,)
+                ).fetchone()
+                if contact and contact["email"]:
+                    unsubscribed = conn.execute(
+                        "SELECT 1 FROM suppression WHERE email = ?",
+                        (contact["email"].strip().lower(),)
+                    ).fetchone()
             if unsubscribed:
                 return -100
 
@@ -851,6 +915,9 @@ class Database:
         """Add an email to suppression list."""
         if not email:
             return
+        email = email.strip().lower()
+        if not email:
+            return
         with self._connect() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO suppression (email, reason, suppressed_at)
@@ -859,6 +926,9 @@ class Database:
 
     def is_suppressed(self, email: str) -> bool:
         """Check if an email is suppressed."""
+        if not email:
+            return False
+        email = email.strip().lower()
         if not email:
             return False
         with self._connect() as conn:
@@ -917,6 +987,10 @@ class Database:
         """
         Get leads with engagement score >= threshold, excluding unsubscribed.
         Returns leads with their engagement scores.
+
+        Excludes leads whose contact email is suppressed, in addition to
+        place_id-level unsubscribes, so a business that unsubscribed via one
+        location/place_id isn't re-delivered via another sharing its email.
         """
         with self._connect() as conn:
             # Get all leads that have been contacted and have events
@@ -930,8 +1004,10 @@ class Database:
                 INNER JOIN contacts c ON l.place_id = c.place_id
                 INNER JOIN audits a ON l.place_id = a.place_id
                 LEFT JOIN unsubscribes u ON l.place_id = u.place_id
+                LEFT JOIN suppression s ON s.email = c.email
                 WHERE o.success = 1
                   AND u.place_id IS NULL
+                  AND s.email IS NULL
             """).fetchall()
 
             # Calculate engagement scores and filter

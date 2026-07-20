@@ -25,6 +25,7 @@ from src.audit_generator import (
     get_issues_json,
 )
 from src.config import OutreachConfig, DeliveryConfig
+from src.db import Lead
 from src.contact_finder import (
     ContactInfo,
     _clean_email,
@@ -365,6 +366,93 @@ class TestDatabaseWarmLeadMethods:
     def test_get_warm_leads_empty(self, test_database):
         leads = test_database.get_warm_leads()
         assert leads == []
+
+    # ------------------------------------------------------------
+    # Email-level suppression across shared place_ids/locations
+    #
+    # A business with two Google Place IDs (e.g. two locations) that shares
+    # one contact email should be fully suppressed after unsubscribing via
+    # either place_id — not just the one that was clicked.
+    # ------------------------------------------------------------
+
+    def test_is_suppressed_and_add_suppression_are_case_insensitive(self, test_database):
+        test_database.add_suppression("Test@Biz.com", "unsubscribed")
+        assert test_database.is_suppressed("test@biz.com") is True
+        assert test_database.is_suppressed("TEST@BIZ.COM") is True
+        assert test_database.is_suppressed(" Test@Biz.com ") is True
+
+    def test_engagement_score_suppressed_via_shared_email_other_place_id(
+        self, test_database
+    ):
+        """Unsubscribing place1 must suppress place2 sharing the same email."""
+        test_database.record_contact("place1", "shared@biz.com", "mailto", 0.9)
+        test_database.record_contact("place2", "shared@biz.com", "mailto", 0.9)
+        test_database.record_event("place2", "page_view")
+
+        # place1's unsubscribe link is clicked; in production this also adds
+        # a suppression entry (see tracking.unsubscribe()).
+        test_database.add_unsubscribe("place1", "shared@biz.com")
+        test_database.add_suppression("shared@biz.com", "unsubscribed")
+
+        # place2 was never itself unsubscribed, but shares the suppressed email.
+        assert test_database.is_unsubscribed("place2") is False
+        assert test_database.get_engagement_score("place2") == -100
+
+    def test_get_leads_ready_for_outreach_excludes_suppressed_email(
+        self, test_database
+    ):
+        lead = Lead(
+            place_id="place_shared",
+            cid=None,
+            name="Shared Biz Location 2",
+            website="https://shared-biz.example",
+            address=None,
+            phone=None,
+            city="Austin, TX",
+            category="plumber",
+            score=80,
+            reasons=["no_https"],
+            first_seen=datetime.utcnow(),
+            last_seen=datetime.utcnow(),
+        )
+        test_database.upsert_lead(lead)
+        test_database.record_audit(
+            "place_shared", "https://track.example/audit/place_shared", "/tmp/x.html", "[]"
+        )
+        test_database.record_contact("place_shared", "shared@biz.com", "mailto", 0.9)
+        test_database.add_suppression("shared@biz.com", "unsubscribed")
+
+        ready = test_database.get_leads_ready_for_outreach(min_score=40)
+        assert all(l["place_id"] != "place_shared" for l in ready)
+
+    def test_get_warm_leads_excludes_suppressed_email(self, test_database):
+        lead = Lead(
+            place_id="place_warm_shared",
+            cid=None,
+            name="Warm Shared Biz",
+            website="https://warm-shared.example",
+            address=None,
+            phone=None,
+            city="Austin, TX",
+            category="plumber",
+            score=80,
+            reasons=["no_https"],
+            first_seen=datetime.utcnow(),
+            last_seen=datetime.utcnow(),
+        )
+        test_database.upsert_lead(lead)
+        test_database.record_audit(
+            "place_warm_shared", "https://track.example/audit/x", "/tmp/x.html", "[]"
+        )
+        test_database.record_contact("place_warm_shared", "shared@biz.com", "mailto", 0.9)
+        test_database.record_outreach(
+            "place_warm_shared", "shared@biz.com", "https://track.example/audit/x", True
+        )
+        test_database.record_event("place_warm_shared", "cta_click")
+        test_database.add_suppression("shared@biz.com", "unsubscribed")
+
+        warm = test_database.get_warm_leads(min_engagement_score=25)
+        assert all(l["place_id"] != "place_warm_shared" for l in warm)
 
 
 # ============================================================

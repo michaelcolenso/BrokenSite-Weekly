@@ -236,6 +236,11 @@ async def unsubscribe(place_id: str, request: Request):
         contact = db.get_contact(place_id)
         email = contact["email"] if contact else ""
         db.add_unsubscribe(place_id, email)
+        if email:
+            # Suppress by email (not just place_id) so a business with
+            # multiple Google Place IDs/locations sharing one contact email
+            # can't keep receiving outreach after unsubscribing once.
+            db.add_suppression(email, "unsubscribed")
         logger.info(f"Unsubscribed {place_id}")
     except Exception as e:
         logger.error(f"Error processing unsubscribe for {place_id}: {e}")
