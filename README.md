@@ -105,3 +105,14 @@ required outreach compliance fields in `.env.example` are configured.
 ## License
 
 MIT
+
+## V1 scanner rebuild
+
+The v1 scanner lives in `scanner/` and follows the execution handoff in `HANDOFF.md`. It uses the honest User-Agent `BSW-Scanner/1.0 (+https://brokensiteweekly.com/bot)`, respects robots.txt, applies per-domain and global rate limits, and implements the eight P0 checks for the Seattle pilot. Non-v1 ideas should be recorded in `PARKING-LOT.md` rather than built.
+
+Run the P0 scanner unit tests with:
+
+```bash
+python -m pytest tests/test_scanner_p0_checks.py -q
+```
+
