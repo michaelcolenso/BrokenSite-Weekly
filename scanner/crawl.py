@@ -120,6 +120,15 @@ class PoliteCrawler:
         self._robots[base] = RobotsCacheEntry(parser=parser, fetched_at=now)
         return parser
 
+    def wait_for_domain(self, domain: str) -> None:
+        """Public pacing hook for auxiliary requests (see DomainThrottledSession)."""
+        self._wait_for_domain(domain)
+
+    def record_request(self, domain: str) -> None:
+        """Record that a request to `domain` just completed (auxiliary requests)."""
+        with self._lock:
+            self._last_request_at[domain] = time.monotonic()
+
     def _wait_for_domain(self, domain: str) -> None:
         with self._lock:
             last = self._last_request_at.get(domain)
@@ -128,3 +137,28 @@ class PoliteCrawler:
         delay = DOMAIN_DELAY_SECONDS - (time.monotonic() - last)
         if delay > 0:
             time.sleep(delay)
+
+
+class DomainThrottledSession(requests.Session):
+    """requests.Session that enforces the same per-domain politeness delay as the crawler.
+
+    Auxiliary check requests (form-action probes, image HEADs) bypass
+    PoliteCrawler.fetch(), so checks receive this session instead of a bare
+    requests.Session. Every outgoing request waits for the shared per-domain
+    10-second pacing window and carries the honest scanner User-Agent.
+    """
+
+    def __init__(self, crawler: PoliteCrawler) -> None:
+        super().__init__()
+        self.headers.update({"User-Agent": USER_AGENT})
+        self._crawler = crawler
+
+    def request(self, method, url, **kwargs):  # noqa: D102 - pacing wrapper
+        domain = urlparse(url).netloc.lower()
+        if domain:
+            self._crawler.wait_for_domain(domain)
+        try:
+            return super().request(method, url, **kwargs)
+        finally:
+            if domain:
+                self._crawler.record_request(domain)
