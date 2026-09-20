@@ -49,5 +49,5 @@ Scoring: lead severity is the max triggered severity, plus 1 if at least 3 check
 1. Confirm domain: `brokensiteweekly.com` or subdomain?
 2. Stripe Payment Link URL.
 3. Resend account status.
-4. Google Places API budget approval or WA SoS-only for v1?
+4. ~~Google Places API budget approval or WA SoS-only for v1?~~ **Decided 2026-09-13: unofficial sourcing.** Lead lists come from small-footprint scraping (the legacy Playwright Maps scraper, or third-party exports such as Outscraper/Apify), normalized by `scripts/build_metro_csv.py` into `data/metros/<metro>.csv`. No official Places API spend for v1. Hard rule 2 still applies to anything run from our own infrastructure: no CAPTCHA solving, no proxy rotation, no fingerprint spoofing; if blocked, skip and record. Third-party exports are preferred when cost is reasonable because they keep our infrastructure and IPs off the source's radar entirely.
 5. Preferred scanner opt-out email.
