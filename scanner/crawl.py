@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from threading import BoundedSemaphore, Lock
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -27,6 +27,7 @@ MAX_CONCURRENT_DOMAINS = 4
 MAX_REQUESTS_PER_PAGE = 2
 MAX_PAGES_PER_SITE = 3
 REQUEST_TIMEOUT_SECONDS = 15
+MAX_ROBOTS_REDIRECTS = 5
 
 
 @dataclass
@@ -72,16 +73,9 @@ class PoliteCrawler:
         # and record, so concurrent threads can't both fetch robots.txt or both skip the delay.
         # Taken before the slot so threads queued on one domain don't hold global slots.
         with self._domain_lock(domain), self._domain_slots:
-            # robots.txt is a request to the domain too (HANDOFF rule 4): pace it when it has
-            # to be fetched, and record it so the page fetch below waits a full delay after it.
-            if not self.robots_cached(url):
-                self._wait_for_domain(domain)
-                try:
-                    allowed = self.allowed(url)
-                finally:
-                    self.record_request(domain)
-            else:
-                allowed = self.allowed(url)
+            # robots.txt is a request to the domain too (HANDOFF rule 4); _fetch_robots paces and
+            # records it, so the page fetch below waits a full delay after it.
+            allowed = self.allowed(url)
             if not allowed:
                 return FetchResult(url=url, status_code=None, error="robots_disallow", blocked=True)
 
@@ -129,7 +123,7 @@ class PoliteCrawler:
         robots_url = f"{base}/robots.txt"
         parser.set_url(robots_url)
         try:
-            response = self.session.get(robots_url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response = self._fetch_robots(robots_url)
             if response.status_code >= 400:
                 parser.parse([])
             else:
@@ -143,6 +137,26 @@ class PoliteCrawler:
             parser.parse([])
         self._robots[base] = RobotsCacheEntry(parser=parser, fetched_at=now)
         return parser
+
+    def _fetch_robots(self, robots_url: str):
+        """GET robots.txt, following redirects by hand so every hop is paced and recorded on the
+        host it actually hits (requests would send the whole chain back-to-back, and a redirect to
+        another host, e.g. apex -> www, would never be paced at all)."""
+        for _ in range(MAX_ROBOTS_REDIRECTS + 1):
+            host = urlparse(robots_url).netloc.lower()
+            self._wait_for_domain(host)
+            try:
+                response = self.session.get(robots_url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
+            finally:
+                self.record_request(host)
+            location = response.headers.get("location")
+            if 300 <= response.status_code < 400 and location:
+                robots_url = urljoin(robots_url, location)
+                if urlparse(robots_url).scheme not in ("http", "https"):
+                    raise requests.RequestException("robots.txt redirect to non-http(s) URL")
+                continue
+            return response
+        raise requests.TooManyRedirects("robots.txt exceeded redirect limit")
 
     def wait_for_domain(self, domain: str) -> None:
         """Public pacing hook for auxiliary requests (see DomainThrottledSession)."""

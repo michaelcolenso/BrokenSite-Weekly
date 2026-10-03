@@ -24,15 +24,27 @@ class FakeClock:
 
 
 class FakeSession:
-    def __init__(self, clock, robots_text="User-agent: *\nAllow: /\n"):
+    """Models requests.Session: with allow_redirects=True it follows redirects itself, so every
+    hop is sent back-to-back at the same instant (which is the behaviour being guarded against)."""
+
+    def __init__(self, clock, robots_text="User-agent: *\nAllow: /\n", robots_redirects=None):
         self.clock = clock
         self.headers = {}
         self.robots_text = robots_text
+        self.robots_redirects = robots_redirects or {}  # url -> redirect target
         self.calls = []  # (kind, url, fake_time)
 
-    def get(self, url, timeout=None):
-        self.calls.append(("robots", url, self.clock.now))
-        return SimpleNamespace(status_code=200, text=self.robots_text, headers={})
+    def get(self, url, timeout=None, allow_redirects=True):
+        for _ in range(30):  # requests gives up after 30 redirects
+            self.calls.append(("robots", url, self.clock.now))
+            target = self.robots_redirects.get(url)
+            if target and allow_redirects:
+                url = target
+                continue
+            if target:
+                return SimpleNamespace(status_code=301, text="", headers={"location": target})
+            return SimpleNamespace(status_code=200, text=self.robots_text, headers={})
+        raise crawl.requests.TooManyRedirects("exceeded 30 redirects")
 
     def request(self, method, url, timeout=None, allow_redirects=True):
         self.calls.append(("page", url, self.clock.now))
@@ -95,7 +107,7 @@ def test_concurrent_fetches_of_one_uncached_domain_fetch_robots_once_and_stay_pa
     stamps = []
     lock = threading.Lock()
 
-    def get(url, timeout=None):
+    def get(url, timeout=None, allow_redirects=True):
         real_time.sleep(0.05)  # widen the window in which a second thread could slip in
         with lock:
             stamps.append(("robots", real_time.monotonic()))
@@ -120,3 +132,32 @@ def test_concurrent_fetches_of_one_uncached_domain_fetch_robots_once_and_stay_pa
     times = [t for _, t in stamps]
     gaps = [b - a for a, b in zip(times, times[1:])]
     assert all(g >= 0.3 - 0.02 for g in gaps), gaps  # every request >= delay after the previous
+
+
+def test_same_host_robots_redirect_hops_are_each_paced(clock):
+    crawler = make(clock, robots_redirects={"https://example.com/robots.txt": "https://example.com/robots2.txt"})
+    crawler.fetch("https://example.com/")
+    robots = [c for c in crawler.session.calls if c[0] == "robots"]
+    assert [c[1] for c in robots] == ["https://example.com/robots.txt", "https://example.com/robots2.txt"]
+    assert robots[1][2] - robots[0][2] >= DOMAIN_DELAY_SECONDS
+    page = [c for c in crawler.session.calls if c[0] == "page"][0]
+    assert page[2] - robots[1][2] >= DOMAIN_DELAY_SECONDS
+
+
+def test_cross_domain_robots_redirect_is_paced_on_the_target_host(clock):
+    crawler = make(clock, robots_redirects={"https://example.com/robots.txt": "https://www.example.com/robots.txt"})
+    crawler.fetch("https://example.com/")
+    robots = [c for c in crawler.session.calls if c[0] == "robots"]
+    assert robots[1][1] == "https://www.example.com/robots.txt"
+    assert robots[1][2] == robots[0][2]  # a different host is not delayed by example.com's window
+    # The redirect target's request was recorded on *its* host, so later requests to it are paced.
+    assert crawler._last_request_at["www.example.com"] == robots[1][2]
+
+
+def test_endless_robots_redirects_terminate_and_are_treated_as_no_robots(clock):
+    loop = {"https://example.com/robots.txt": "https://example.com/robots.txt"}
+    crawler = make(clock, robots_redirects=loop)
+    result = crawler.fetch("https://example.com/")
+    assert result.status_code == 200  # unavailable robots.txt => allowed
+    robots = [c for c in crawler.session.calls if c[0] == "robots"]
+    assert 1 < len(robots) <= 7
