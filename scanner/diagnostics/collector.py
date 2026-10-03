@@ -109,8 +109,8 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
     from playwright.sync_api import sync_playwright
 
     result = BrowseResult()
-    broken: dict[str, None] = {}
-    mixed: set[str] = set()
+    broken: dict[str, Optional[str]] = {}  # url -> issuing document URL
+    mixed: dict[str, Optional[str]] = {}
 
     with sync_playwright() as p:
         # BSW_CHROMIUM_PATH: optional override when Playwright's pinned build isn't installed.
@@ -160,19 +160,27 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
 
             context.route("**/*", on_route)
 
+            # Tag each request with the document URL that issued it, so observations from a
+            # document we later left (redirect hop, client-side navigation) are excluded.
+            issuer: dict = {}
+
+            def on_request(req):
+                try:
+                    issuer[req] = req.frame.url.split("#")[0]
+                except Exception:  # noqa: BLE001 - detached frame
+                    issuer[req] = None
+                # Navigations (e.g. an http->https redirect hop) are not subresources.
+                if req.url.startswith("http://") and not req.is_navigation_request():
+                    mixed[req.url] = issuer[req]
+
             def on_response(response):
                 req = response.request
                 if req.resource_type in ASSET_TYPES and response.status >= 400:
-                    broken[response.url] = None
+                    broken[response.url] = issuer.get(req)
 
             def on_failed(req):
                 if req.resource_type in ASSET_TYPES:
-                    broken[req.url] = None
-
-            def on_request(req):
-                # Navigations (e.g. an http->https redirect hop) are not subresources.
-                if req.url.startswith("http://") and not req.is_navigation_request():
-                    mixed.add(req.url)
+                    broken[req.url] = issuer.get(req)
 
             page.on("response", on_response)
             page.on("requestfailed", on_failed)
@@ -229,10 +237,11 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
         finally:
             browser.close()
 
+    final_doc = result.final_url.split("#")[0]
     # Only meaningful when the page itself was served over HTTPS.
     if result.final_url.startswith("https://"):
-        result.mixed_content_count = len(mixed)
-    result.broken_assets = list(broken)
+        result.mixed_content_count = sum(1 for doc in mixed.values() if doc == final_doc)
+    result.broken_assets = [u for u, doc in broken.items() if doc == final_doc]
     return result
 
 

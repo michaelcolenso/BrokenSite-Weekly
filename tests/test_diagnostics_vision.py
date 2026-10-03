@@ -45,6 +45,11 @@ class Handler(BaseHTTPRequestHandler):
             body, code = OVERFLOW.encode(), 200
         elif path == "/noviewport":
             body, code = NO_VIEWPORT.encode(), 200
+        elif path == "/prenav":
+            body = b"<html><body><img src='/missing.png'><script>location.href='/clean'</script></body></html>"
+            code = 200
+        elif path == "/clean":
+            body, code = b"<html><body><h1>clean</h1></body></html>", 200
         elif path == "/jsnav":
             body = f"<html><body><script>location.href='http://127.0.0.1:{OTHER_PORT['p']}/secret'</script></body></html>".encode()
             code = 200
@@ -174,6 +179,13 @@ def test_multi_hop_chain_every_hop_vetted_and_paced(server, tmp_path):
                            lambda u: (vetted.append(u), True)[1], waits.append, lambda h: None)
     assert res.http_status == 200 and len(res.redirect_chain) == 2
     assert len(vetted) == 3 and len(waits) == 3  # /hop1, /redir, / each vetted and paced
+
+
+def test_asset_observations_reset_on_client_side_navigation(server, tmp_path):
+    # /prenav loads a 404 image, then JS-navigates to a clean page: only the final document counts.
+    r = collect(f"http://{server}/prenav", tmp_path)
+    assert r.status == "ok" and r.final_url.endswith("/clean")
+    assert r.broken_asset_count == 0 and r.mixed_content_count == 0
 
 
 def test_robots_rechecked_on_client_side_navigation(server, tmp_path):
