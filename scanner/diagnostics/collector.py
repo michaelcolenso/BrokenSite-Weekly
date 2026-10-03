@@ -35,6 +35,7 @@ NAV_TIMEOUT_MS = 15_000
 SSL_TIMEOUT_SECONDS = 10
 MAX_ATTEMPTS = 2
 MAX_REDIRECTS = 10
+SETTLE_MS = 500  # let immediate JS / meta-refresh navigations land before capture
 BACKOFF_SECONDS = 2.0
 ASSET_TYPES = {"image", "stylesheet", "script", "font"}
 MAX_LISTED_ASSETS = 10
@@ -57,7 +58,7 @@ class BrowseResult:
     contact_methods: list[ContactMethod] = field(default_factory=list)
     screenshot_path: Optional[str] = None
     mobile_screenshot_path: Optional[str] = None
-    mobile_redirect_url: Optional[str] = None
+    blocked_navigation_url: Optional[str] = None
 
 
 def normalize_url(raw: str) -> str:
@@ -96,6 +97,11 @@ _CONTACT_JS = """() => ({
 
 # clientWidth is the layout viewport (390 with a device-width meta tag, 980 without);
 # innerWidth would already be stretched to the content width in mobile mode.
+def is_mixed_content_request(url: str, is_navigation: bool, is_main_frame: bool) -> bool:
+    """HTTP subresource or child-frame document. Only main-frame navigations are exempt."""
+    return url.startswith("http://") and not (is_navigation and is_main_frame)
+
+
 _OVERFLOW_JS = "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
 
 
@@ -131,8 +137,9 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             def on_route(route):
                 req = route.request
                 if frozen["on"] and req.is_navigation_request() and req.frame.parent_frame is None:
-                    # The mobile pass must measure the same document the desktop pass saw, so
-                    # veto navigations a resize handler triggers (e.g. redirect to an m. host).
+                    # After the settle window every capture must describe one document, so veto
+                    # navigations a late timer or a resize handler triggers (e.g. redirect to an
+                    # m. host).
                     # ERR_ABORTED keeps the current document; the default error code would
                     # commit an error page.
                     frozen_hits.append(req.url)
@@ -181,12 +188,21 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
                     issuer[req] = req.frame.url.split("#")[0]
                 except Exception:  # noqa: BLE001 - detached frame
                     issuer[req] = None
-                # Navigations (e.g. an http->https redirect hop) are not subresources.
-                if req.url.startswith("http://") and not req.is_navigation_request():
+                try:
+                    main_frame = req.frame.parent_frame is None
+                except Exception:  # noqa: BLE001
+                    main_frame = False
+                if is_mixed_content_request(req.url, req.is_navigation_request(), main_frame):
                     mixed[req.url] = issuer[req]
+
+            doc = {"status": 0, "url": ""}  # latest main-frame document actually served
 
             def on_response(response):
                 req = response.request
+                if req.is_navigation_request() and req.frame.parent_frame is None:
+                    if not pending:  # skip the blank page we serve for a redirect hop
+                        doc["status"], doc["url"] = response.status, response.url
+                    return
                 if req.resource_type in ASSET_TYPES and response.status >= 400:
                     broken[response.url] = issuer.get(req)
 
@@ -220,10 +236,18 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             result.redirect_chain = chain
             if blocked:  # a script/meta-refresh navigation was vetoed during load
                 raise RobotsBlocked(blocked[0])
-            if response is None:
+            # Immediate client-side navigations (script / meta refresh) are allowed to land, each
+            # robots-checked and paced by the handler; then navigation is frozen so every capture
+            # below describes one document.
+            page.wait_for_timeout(SETTLE_MS)
+            frozen["on"] = True
+            if blocked:
+                raise RobotsBlocked(blocked[0])
+            if not doc["url"]:
                 raise RuntimeError("no_response")
-            result.http_status = response.status
-            result.final_url = page.url
+            result.http_status, result.final_url = doc["status"], doc["url"]
+            if page.url.split("#")[0] != doc["url"].split("#")[0]:
+                raise RuntimeError("document_changed_during_capture")
 
             out_dir.mkdir(parents=True, exist_ok=True)
             desktop_path = out_dir / f"{stem}-desktop.png"
@@ -236,7 +260,6 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             # Mobile emulation on the already-loaded page (no second fetch). is_mobile can't be
             # toggled on a Playwright context, so use CDP (Chromium-only). This honours the
             # meta viewport: pages without one lay out at 980px, as on a phone.
-            frozen["on"] = True
             page.set_viewport_size(MOBILE_VIEWPORT)  # sizes the screenshot; CDP override sets mobile semantics
             cdp = context.new_cdp_session(page)
             cdp.send("Emulation.setDeviceMetricsOverride", {**MOBILE_VIEWPORT, "deviceScaleFactor": 1, "mobile": True})
@@ -246,9 +269,11 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             page.screenshot(path=str(mobile_path), type="png", full_page=False)
             result.mobile_screenshot_path = str(mobile_path)
             if frozen_hits:
-                result.mobile_redirect_url = frozen_hits[0]
-            if blocked:  # a delayed client-side navigation was vetoed
+                result.blocked_navigation_url = frozen_hits[0]
+            if blocked:
                 raise RobotsBlocked(blocked[0])
+            if page.url.split("#")[0] != doc["url"].split("#")[0]:
+                raise RuntimeError("document_changed_during_capture")
         finally:
             browser.close()
 
@@ -327,7 +352,8 @@ def collect_diagnostics(
             report.error = last_error
             if "ERR_CERT" in last_error or "SSL" in last_error.upper():
                 report.ssl_valid = False
-                report.ssl_error = report.ssl_error or last_error
+                if report.ssl_error in (None, "no_https"):  # keep a more specific pre-check error
+                    report.ssl_error = last_error
             return finish(report)
 
         # TLS must describe where the browser actually ended up (http -> https redirects).
@@ -351,7 +377,7 @@ def collect_diagnostics(
         report.contact_methods_found = browsed.contact_methods
         report.screenshot_path = browsed.screenshot_path
         report.mobile_screenshot_path = browsed.mobile_screenshot_path
-        report.mobile_redirect_url = browsed.mobile_redirect_url
+        report.blocked_navigation_url = browsed.blocked_navigation_url
         return finish(report)
     except Exception as exc:  # noqa: BLE001 - never raise
         logger.error("diagnostics crashed for %s: %s", domain, exc)

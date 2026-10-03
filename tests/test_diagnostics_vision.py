@@ -45,6 +45,12 @@ class Handler(BaseHTTPRequestHandler):
             body, code = OVERFLOW.encode(), 200
         elif path == "/noviewport":
             body, code = NO_VIEWPORT.encode(), 200
+        elif path == "/latenav":  # lands inside the settle window -> followed
+            body = b"<html><body><script>setTimeout(()=>location.href='/clean',150)</script></body></html>"
+            code = 200
+        elif path == "/verylatenav":  # lands after the freeze -> vetoed
+            body = b"<html><body><h1>stay</h1><script>setTimeout(()=>location.href='/clean',3000)</script></body></html>"
+            code = 200
         elif path == "/resizenav":
             body = (b"<html><body><h1>desktop</h1><script>"
                     b"window.addEventListener('resize',()=>{location.href='/clean'})</script></body></html>")
@@ -269,8 +275,35 @@ def test_ssl_false_when_https_input_downgrades_to_http(tmp_path):
 def test_navigation_during_mobile_pass_is_vetoed(server, tmp_path):
     r = collect(f"http://{server}/resizenav", tmp_path)
     assert r.status == "ok" and r.final_url.endswith("/resizenav")
-    assert r.mobile_redirect_url and r.mobile_redirect_url.endswith("/clean")
+    assert r.blocked_navigation_url and r.blocked_navigation_url.endswith("/clean")
     assert Path(r.mobile_screenshot_path).stat().st_size > 0
+
+
+def test_client_navigation_inside_settle_window_is_followed(server, tmp_path):
+    r = collect(f"http://{server}/latenav", tmp_path)
+    assert r.status == "ok" and r.http_status == 200 and r.final_url.endswith("/clean")
+
+
+def test_navigation_after_settle_window_is_vetoed_and_metadata_consistent(server, tmp_path):
+    r = collect(f"http://{server}/verylatenav", tmp_path)
+    assert r.status == "ok" and r.final_url.endswith("/verylatenav")
+    assert r.blocked_navigation_url is None or r.blocked_navigation_url.endswith("/clean")
+
+
+def test_http_iframe_counts_as_mixed_but_main_frame_navigation_does_not():
+    f = collector.is_mixed_content_request
+    assert f("http://x/img.png", False, True)        # subresource
+    assert f("http://x/frame", True, False)          # child-frame document
+    assert not f("http://x/", True, True)            # main-frame navigation (redirect hop)
+    assert not f("https://x/a.png", False, True)
+
+
+def test_cert_error_after_http_redirect_is_not_reported_as_no_https(tmp_path):
+    def boom(*a):
+        raise RuntimeError("Page.goto: net::ERR_CERT_DATE_INVALID")
+    r = collect_diagnostics("http://example.com", tmp_path, crawler=FastCrawler(), browse_fn=boom,
+                            sleep=lambda s: None)
+    assert r.status == "error" and r.ssl_valid is False and "ERR_CERT" in r.ssl_error
 
 
 @pytest.mark.parametrize("bad", ["https://[bad", "http://[::1", "https://host:notaport/"])
