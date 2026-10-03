@@ -117,7 +117,8 @@ def browse(url: str, out_dir: Path, stem: str) -> BrowseResult:
                     broken[req.url] = None
 
             def on_request(req):
-                if req.url.startswith("http://"):
+                # Navigations (e.g. an http->https redirect hop) are not subresources.
+                if req.url.startswith("http://") and not req.is_navigation_request():
                     mixed.add(req.url)
 
             page.on("response", on_response)
@@ -193,8 +194,10 @@ def collect_diagnostics(
             return finish(DiagnosticReport(domain=domain, url=url, status="blocked", error="robots_disallow"))
 
         report = DiagnosticReport(domain=domain, url=url, status="error")
+        checked_tls = None
         if parsed.scheme == "https":
-            valid, expires, ssl_error = ssl_fn(domain, parsed.port or 443)
+            checked_tls = (domain, parsed.port or 443)
+            valid, expires, ssl_error = ssl_fn(*checked_tls)
             report.ssl_valid, report.ssl_expires_at, report.ssl_error = valid, expires, ssl_error
         else:
             report.ssl_error = "no_https"
@@ -221,6 +224,15 @@ def collect_diagnostics(
                 report.ssl_valid = False
                 report.ssl_error = report.ssl_error or last_error
             return finish(report)
+
+        # TLS must describe where the browser actually ended up (http -> https redirects).
+        final = urlparse(browsed.final_url)
+        if final.scheme == "https" and final.hostname:
+            target = (final.hostname.lower(), final.port or 443)
+            if target != checked_tls:
+                report.ssl_valid, report.ssl_expires_at, report.ssl_error = ssl_fn(*target)
+        elif final.scheme == "http":
+            report.ssl_valid, report.ssl_expires_at, report.ssl_error = False, None, "no_https"
 
         report.status = "ok"
         report.http_status = browsed.http_status

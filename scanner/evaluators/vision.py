@@ -159,12 +159,12 @@ def evaluate_screenshot(
                 # Non-retryable (auth, bad request): fail now.
                 return VisionResult(domain=domain, status="error", reason=f"http_{resp.status_code}", model=model)
             else:
-                text = "".join(
-                    b.get("text", "") for b in resp.json().get("content", []) if b.get("type") == "text"
-                )
+                blocks = resp.json()["content"]
+                text = "".join(b["text"] for b in blocks if isinstance(b, dict) and b.get("type") == "text")
                 return VisionResult(domain=domain, status="ok", model=model, verdict=parse_verdict(text))
-        except (requests.RequestException, ValueError, ValidationError) as exc:
-            # ValueError covers JSONDecodeError and parse_verdict failures.
+        except (requests.RequestException, ValueError, ValidationError, AttributeError, TypeError, KeyError) as exc:
+            # ValueError covers JSONDecodeError and parse_verdict failures; Attribute/Type/KeyError
+            # cover a 200 whose JSON isn't the expected shape ([], {"content": null}, ...).
             last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
         logger.warning("vision attempt %d failed for %s: %s", attempt, domain, last_error)
         if attempt < MAX_ATTEMPTS:

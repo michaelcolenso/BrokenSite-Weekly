@@ -144,6 +144,31 @@ def test_ssl_error_is_contained(server, tmp_path):
     assert r.screenshot_path is None
 
 
+def test_ssl_checked_on_final_https_destination_after_http_redirect(tmp_path):
+    seen = []
+    browsed = collector.BrowseResult(http_status=200, final_url="https://example.com/")
+    r = collect_diagnostics("http://example.com", tmp_path, crawler=FastCrawler(),
+                            browse_fn=lambda *a: browsed,
+                            ssl_fn=lambda h, p: (seen.append((h, p)), (True, "2030-01-01T00:00:00+00:00", None))[1])
+    assert seen == [("example.com", 443)]
+    assert r.ssl_valid is True and r.ssl_error is None
+
+
+def test_ssl_not_rechecked_when_https_input_stays_on_same_host(tmp_path):
+    seen = []
+    browsed = collector.BrowseResult(http_status=200, final_url="https://example.com/x")
+    collect_diagnostics("https://example.com", tmp_path, crawler=FastCrawler(), browse_fn=lambda *a: browsed,
+                        ssl_fn=lambda h, p: (seen.append(h), (True, None, None))[1])
+    assert seen == ["example.com"]
+
+
+def test_ssl_false_when_https_input_downgrades_to_http(tmp_path):
+    browsed = collector.BrowseResult(http_status=200, final_url="http://example.com/")
+    r = collect_diagnostics("https://example.com", tmp_path, crawler=FastCrawler(), browse_fn=lambda *a: browsed,
+                            ssl_fn=lambda h, p: (True, None, None))
+    assert r.ssl_valid is False and r.ssl_error == "no_https"
+
+
 def test_invalid_url_is_contained(tmp_path):
     r = collect("", tmp_path)
     assert r.status == "error" and r.error == "invalid_url"
@@ -238,6 +263,16 @@ def test_vision_malformed_reply_is_contained(tmp_path):
     session.post.return_value = api_response(text="I think it looks fine!")
     res = evaluate_screenshot(ok_report(tmp_path), "plumber", api_key="k", session=session, sleep=lambda s: None)
     assert res.status == "error" and res.verdict is None and session.post.call_count == 2
+
+
+@pytest.mark.parametrize("payload", [[], {"content": None}, {"content": [None, 5]}, {"content": "text"}, {}])
+def test_vision_unexpected_200_payload_is_contained(tmp_path, payload):
+    session = Mock()
+    resp = Mock(status_code=200)
+    resp.json.return_value = payload
+    session.post.return_value = resp
+    res = evaluate_screenshot(ok_report(tmp_path), "plumber", api_key="k", session=session, sleep=lambda s: None)
+    assert res.status == "error" and res.verdict is None
 
 
 def test_vision_schema_violation_rejected():
