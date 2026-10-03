@@ -85,8 +85,7 @@ class PoliteCrawler:
             except requests.RequestException as exc:
                 return FetchResult(url=url, status_code=None, error=str(exc))
             finally:
-                with self._lock:
-                    self._last_request_at[domain] = time.monotonic()
+                self._touch(domain)
 
         content_type = response.headers.get("content-type", "")
         text = ""
@@ -104,12 +103,6 @@ class PoliteCrawler:
     def allowed(self, url: str) -> bool:
         parser = self._get_robots(url)
         return parser.can_fetch(USER_AGENT, url)
-
-    def robots_cached(self, url: str) -> bool:
-        """True if allowed(url) can answer without a network request (fresh cache entry)."""
-        parsed = urlparse(url)
-        entry = self._robots.get(f"{parsed.scheme}://{parsed.netloc}")
-        return bool(entry and time.time() - entry.fetched_at < ROBOTS_CACHE_SECONDS)
 
     def _get_robots(self, url: str) -> RobotFileParser:
         parsed = urlparse(url)
@@ -164,15 +157,27 @@ class PoliteCrawler:
 
     def record_request(self, domain: str) -> None:
         """Record that a request to `domain` just completed (auxiliary requests)."""
+        self._touch(domain)
+
+    def _touch(self, domain: str) -> None:
+        # max(): never move the timestamp back past a slot another caller has reserved.
         with self._lock:
-            self._last_request_at[domain] = time.monotonic()
+            self._last_request_at[domain] = max(self._last_request_at.get(domain, 0.0), time.monotonic())
 
     def _wait_for_domain(self, domain: str) -> None:
+        """Wait for, and atomically reserve, this caller's request slot on `domain`.
+
+        The reservation is made under the lock, so concurrent callers (including ones arriving
+        from another domain's robots.txt redirect) queue one delay apart instead of all seeing
+        the same "last request" and firing together. Call once per request, immediately before
+        sending it; a second call without a request in between reserves a second slot.
+        """
         with self._lock:
+            now = time.monotonic()
             last = self._last_request_at.get(domain)
-        if last is None:
-            return
-        delay = DOMAIN_DELAY_SECONDS - (time.monotonic() - last)
+            start = now if last is None else max(now, last + DOMAIN_DELAY_SECONDS)
+            self._last_request_at[domain] = start
+        delay = start - now
         if delay > 0:
             time.sleep(delay)
 

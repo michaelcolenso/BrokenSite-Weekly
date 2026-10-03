@@ -97,19 +97,6 @@ _CONTACT_JS = """() => ({
 
 # clientWidth is the layout viewport (390 with a device-width meta tag, 980 without);
 # innerWidth would already be stretched to the content width in mobile mode.
-def paced_allowed(url, allow_fn, cached_fn=None, wait_fn=None, record_fn=None) -> bool:
-    """robots.txt check whose own network fetch (uncached origin) is paced and recorded."""
-    host = urlparse(url).netloc.lower()
-    fetches = bool(cached_fn) and not cached_fn(url)
-    if fetches and wait_fn:
-        wait_fn(host)
-    try:
-        return allow_fn(url)
-    finally:
-        if fetches and record_fn:
-            record_fn(host)
-
-
 def _top_level_url(frame) -> str:
     while frame.parent_frame is not None:
         frame = frame.parent_frame
@@ -124,14 +111,13 @@ def is_mixed_content_request(url: str, is_navigation: bool, is_main_frame: bool)
 _OVERFLOW_JS = "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
 
 
-def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, record_fn=None,
-           cached_fn=None) -> BrowseResult:
+def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, record_fn=None) -> BrowseResult:
     """Load `url` in headless Chromium and gather facts. May raise.
 
     Every main-frame navigation (initial, redirect hop, JS or meta-refresh) is vetted with
     `allow_fn(url) -> bool` (robots.txt); a disallowed one is aborted and RobotsBlocked raised.
-    `wait_fn(netloc)` / `record_fn(netloc)` pace each navigation's own host and any robots.txt
-    fetch it triggers (`cached_fn(url)` says whether robots.txt is already cached). Sub-resource
+    `wait_fn(netloc)` reserves a request slot on, and `record_fn(netloc)` stamps, each navigation's
+    own host. `allow_fn` is expected to pace its own robots.txt fetches (PoliteCrawler.allowed does). Sub-resource
     requests are not paced (documented limitation).
     """
     from playwright.sync_api import sync_playwright
@@ -174,7 +160,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
                 # it re-requests any Location, which lands here again, so every hop is vetted.
                 host = urlparse(req.url).netloc.lower()
                 try:
-                    if not paced_allowed(req.url, allow_fn, cached_fn, wait_fn, record_fn):
+                    if not allow_fn(req.url):
                         blocked.append(req.url)
                         route.abort()
                         return
@@ -339,8 +325,7 @@ def collect_diagnostics(
 
     try:
         crawler = crawler or PoliteCrawler()
-        if not paced_allowed(url, crawler.allowed, crawler.robots_cached,
-                             crawler.wait_for_domain, crawler.record_request):
+        if not crawler.allowed(url):
             return finish(DiagnosticReport(domain=domain, url=url, status="blocked", error="robots_disallow"))
 
         report = DiagnosticReport(domain=domain, url=url, status="error")
@@ -354,10 +339,11 @@ def collect_diagnostics(
 
         last_error = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            crawler.wait_for_domain(parsed.netloc.lower())
+            # No wait/record here: browse() reserves and stamps a slot per navigation itself, and a
+            # second wait would reserve a second slot (an extra delay) for the same request.
             try:
                 browsed = browse_fn(url, Path(output_dir), _safe_stem(domain), crawler.allowed,
-                                   crawler.wait_for_domain, crawler.record_request, crawler.robots_cached)
+                                   crawler.wait_for_domain, crawler.record_request)
             except RobotsBlocked as exc:
                 report.status, report.error = "blocked", f"robots_disallow: {exc}"
                 return finish(report)
@@ -367,8 +353,6 @@ def collect_diagnostics(
             else:
                 last_error = None
                 break
-            finally:
-                crawler.record_request(parsed.netloc.lower())
             if attempt < MAX_ATTEMPTS:
                 sleep(BACKOFF_SECONDS * attempt)
 

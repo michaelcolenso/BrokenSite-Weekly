@@ -161,3 +161,61 @@ def test_endless_robots_redirects_terminate_and_are_treated_as_no_robots(clock):
     assert result.status_code == 200  # unavailable robots.txt => allowed
     robots = [c for c in crawler.session.calls if c[0] == "robots"]
     assert 1 < len(robots) <= 7
+
+
+def test_wait_for_domain_reserves_slots_atomically_across_threads(monkeypatch):
+    import threading
+    import time as real_time
+
+    monkeypatch.setattr(crawl, "DOMAIN_DELAY_SECONDS", 0.2)
+    crawler = PoliteCrawler(session=FakeSession(SimpleNamespace(now=0.0)))
+    starts, lock = [], threading.Lock()
+
+    def worker():
+        crawler._wait_for_domain("b.example")
+        with lock:
+            starts.append(real_time.monotonic())
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    starts.sort()
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert len(starts) == 4 and all(g >= 0.2 - 0.03 for g in gaps), gaps
+
+
+def test_robots_redirect_into_a_host_another_worker_is_fetching_stays_paced(monkeypatch):
+    import threading
+    import time as real_time
+
+    monkeypatch.setattr(crawl, "DOMAIN_DELAY_SECONDS", 0.3)
+    stamps, lock = [], threading.Lock()
+
+    class Session:
+        headers = {}
+
+        def get(self, url, timeout=None, allow_redirects=True):
+            with lock:
+                stamps.append((url, real_time.monotonic()))
+            real_time.sleep(0.05)  # request in flight: widens the window a racing worker could use
+            if url == "https://a.example/robots.txt":
+                return SimpleNamespace(status_code=301, text="", headers={"location": "https://b.example/robots.txt"})
+            return SimpleNamespace(status_code=200, text="User-agent: *\nAllow: /\n", headers={})
+
+        def request(self, method, url, timeout=None, allow_redirects=True):
+            with lock:
+                stamps.append((url, real_time.monotonic()))
+            return SimpleNamespace(status_code=200, text="", encoding=None, url=url, headers={"content-type": "text/html"})
+
+    crawler = PoliteCrawler(session=Session())
+    threads = [threading.Thread(target=crawler.fetch, args=(u,)) for u in
+               ("https://a.example/", "https://b.example/")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    b_times = sorted(t for url, t in stamps if "b.example" in url)
+    gaps = [y - x for x, y in zip(b_times, b_times[1:])]
+    assert len(b_times) >= 3 and all(g >= 0.3 - 0.03 for g in gaps), gaps

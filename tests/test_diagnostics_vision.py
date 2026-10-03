@@ -145,7 +145,7 @@ def server():
 class FastCrawler(PoliteCrawler):
     """No 10s pacing in tests."""
 
-    def wait_for_domain(self, domain):
+    def _wait_for_domain(self, domain):
         pass
 
 
@@ -295,27 +295,6 @@ def test_redirect_triggered_inside_settle_window_is_followed(server, tmp_path):
 def test_requests_inside_iframes_are_attributed_to_the_top_level_document(server, tmp_path):
     r = collect(f"http://{server}/withframe", tmp_path)
     assert r.status == "ok" and r.broken_asset_count == 1  # the 404 image inside the iframe
-
-
-def test_uncached_robots_fetch_is_paced_before_each_navigation(server, tmp_path):
-    waits, records = [], []
-    res = collector.browse(f"http://{server}/redir", tmp_path, "robots-pace", lambda u: True,
-                           waits.append, records.append, lambda u: False)
-    assert res.http_status == 200
-    # 2 navigations (initial + hop) x (robots.txt fetch + page fetch)
-    assert waits == records == [server] * 4
-
-
-def test_robots_cached_helper(tmp_path):
-    import time as _t
-    from urllib.robotparser import RobotFileParser
-    from scanner.crawl import RobotsCacheEntry
-    c = PoliteCrawler()
-    assert c.robots_cached("http://example.com/x") is False
-    c._robots["http://example.com"] = RobotsCacheEntry(parser=RobotFileParser(), fetched_at=_t.time())
-    assert c.robots_cached("http://example.com/y") is True
-    c._robots["http://example.com"].fetched_at = 0
-    assert c.robots_cached("http://example.com/y") is False
 
 
 def test_client_navigation_inside_settle_window_is_followed(server, tmp_path):
