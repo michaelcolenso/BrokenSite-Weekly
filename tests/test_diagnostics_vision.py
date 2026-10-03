@@ -45,6 +45,13 @@ class Handler(BaseHTTPRequestHandler):
             body, code = OVERFLOW.encode(), 200
         elif path == "/noviewport":
             body, code = NO_VIEWPORT.encode(), 200
+        elif path == "/settleredir":  # client-side nav whose target is itself a server redirect
+            body = b"<html><body><script>setTimeout(()=>location.href='/redir',100)</script></body></html>"
+            code = 200
+        elif path == "/withframe":
+            body, code = b"<html><body><iframe src='/framepage'></iframe></body></html>", 200
+        elif path == "/framepage":
+            body, code = b"<html><body><img src='/missing.png'></body></html>", 200
         elif path == "/latenav":  # lands inside the settle window -> followed
             body = b"<html><body><script>setTimeout(()=>location.href='/clean',150)</script></body></html>"
             code = 200
@@ -277,6 +284,38 @@ def test_navigation_during_mobile_pass_is_vetoed(server, tmp_path):
     assert r.status == "ok" and r.final_url.endswith("/resizenav")
     assert r.blocked_navigation_url and r.blocked_navigation_url.endswith("/clean")
     assert Path(r.mobile_screenshot_path).stat().st_size > 0
+
+
+def test_redirect_triggered_inside_settle_window_is_followed(server, tmp_path):
+    r = collect(f"http://{server}/settleredir", tmp_path)
+    assert r.status == "ok" and r.http_status == 200
+    assert r.final_url == f"http://{server}/" and r.screenshot_path
+
+
+def test_requests_inside_iframes_are_attributed_to_the_top_level_document(server, tmp_path):
+    r = collect(f"http://{server}/withframe", tmp_path)
+    assert r.status == "ok" and r.broken_asset_count == 1  # the 404 image inside the iframe
+
+
+def test_uncached_robots_fetch_is_paced_before_each_navigation(server, tmp_path):
+    waits, records = [], []
+    res = collector.browse(f"http://{server}/redir", tmp_path, "robots-pace", lambda u: True,
+                           waits.append, records.append, lambda u: False)
+    assert res.http_status == 200
+    # 2 navigations (initial + hop) x (robots.txt fetch + page fetch)
+    assert waits == records == [server] * 4
+
+
+def test_robots_cached_helper(tmp_path):
+    import time as _t
+    from urllib.robotparser import RobotFileParser
+    from scanner.crawl import RobotsCacheEntry
+    c = PoliteCrawler()
+    assert c.robots_cached("http://example.com/x") is False
+    c._robots["http://example.com"] = RobotsCacheEntry(parser=RobotFileParser(), fetched_at=_t.time())
+    assert c.robots_cached("http://example.com/y") is True
+    c._robots["http://example.com"].fetched_at = 0
+    assert c.robots_cached("http://example.com/y") is False
 
 
 def test_client_navigation_inside_settle_window_is_followed(server, tmp_path):

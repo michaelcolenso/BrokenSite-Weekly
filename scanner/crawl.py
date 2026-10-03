@@ -93,6 +93,12 @@ class PoliteCrawler:
         parser = self._get_robots(url)
         return parser.can_fetch(USER_AGENT, url)
 
+    def robots_cached(self, url: str) -> bool:
+        """True if allowed(url) can answer without a network request (fresh cache entry)."""
+        parsed = urlparse(url)
+        entry = self._robots.get(f"{parsed.scheme}://{parsed.netloc}")
+        return bool(entry and time.time() - entry.fetched_at < ROBOTS_CACHE_SECONDS)
+
     def _get_robots(self, url: str) -> RobotFileParser:
         parsed = urlparse(url)
         base = f"{parsed.scheme}://{parsed.netloc}"

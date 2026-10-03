@@ -97,6 +97,25 @@ _CONTACT_JS = """() => ({
 
 # clientWidth is the layout viewport (390 with a device-width meta tag, 980 without);
 # innerWidth would already be stretched to the content width in mobile mode.
+def paced_allowed(url, allow_fn, cached_fn=None, wait_fn=None, record_fn=None) -> bool:
+    """robots.txt check whose own network fetch (uncached origin) is paced and recorded."""
+    host = urlparse(url).netloc.lower()
+    fetches = bool(cached_fn) and not cached_fn(url)
+    if fetches and wait_fn:
+        wait_fn(host)
+    try:
+        return allow_fn(url)
+    finally:
+        if fetches and record_fn:
+            record_fn(host)
+
+
+def _top_level_url(frame) -> str:
+    while frame.parent_frame is not None:
+        frame = frame.parent_frame
+    return frame.url.split("#")[0]
+
+
 def is_mixed_content_request(url: str, is_navigation: bool, is_main_frame: bool) -> bool:
     """HTTP subresource or child-frame document. Only main-frame navigations are exempt."""
     return url.startswith("http://") and not (is_navigation and is_main_frame)
@@ -105,12 +124,14 @@ def is_mixed_content_request(url: str, is_navigation: bool, is_main_frame: bool)
 _OVERFLOW_JS = "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
 
 
-def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, record_fn=None) -> BrowseResult:
+def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, record_fn=None,
+           cached_fn=None) -> BrowseResult:
     """Load `url` in headless Chromium and gather facts. May raise.
 
     Every main-frame navigation (initial, redirect hop, JS or meta-refresh) is vetted with
     `allow_fn(url) -> bool` (robots.txt); a disallowed one is aborted and RobotsBlocked raised.
-    `wait_fn(netloc)` / `record_fn(netloc)` pace each navigation's own host. Sub-resource
+    `wait_fn(netloc)` / `record_fn(netloc)` pace each navigation's own host and any robots.txt
+    fetch it triggers (`cached_fn(url)` says whether robots.txt is already cached). Sub-resource
     requests are not paced (documented limitation).
     """
     from playwright.sync_api import sync_playwright
@@ -129,7 +150,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             blocked: list[str] = []
 
             route_errors: list[str] = []
-            pending: list[str] = []
+            pending: list[tuple[str, str]] = []  # (redirecting URL, redirect target)
 
             frozen = {"on": False}
             frozen_hits: list[str] = []
@@ -153,7 +174,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
                 # it re-requests any Location, which lands here again, so every hop is vetted.
                 host = urlparse(req.url).netloc.lower()
                 try:
-                    if not allow_fn(req.url):
+                    if not paced_allowed(req.url, allow_fn, cached_fn, wait_fn, record_fn):
                         blocked.append(req.url)
                         route.abort()
                         return
@@ -169,7 +190,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
                         # Chromium would follow further hops without calling this handler, so
                         # hand it a blank page and let browse() issue the next hop as its own
                         # routed navigation (aborting instead leaves an error page that races it).
-                        pending.append(urljoin(req.url, location))
+                        pending.append((req.url, urljoin(req.url, location)))
                         route.fulfill(status=200, content_type="text/html", body="")
                         return
                     route.fulfill(response=resp)
@@ -185,7 +206,8 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
 
             def on_request(req):
                 try:
-                    issuer[req] = req.frame.url.split("#")[0]
+                    # Attribute to the top-level document, also for requests made inside iframes.
+                    issuer[req] = _top_level_url(req.frame)
                 except Exception:  # noqa: BLE001 - detached frame
                     issuer[req] = None
                 try:
@@ -226,9 +248,13 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
                     if route_errors:
                         raise RuntimeError(route_errors[0]) from None
                     raise
+                if not pending:
+                    # Let immediate client-side navigations (script / meta refresh) land; each is
+                    # robots-checked and paced by the handler, and may itself be a redirect.
+                    page.wait_for_timeout(SETTLE_MS)
                 if pending and not blocked:
-                    chain.append(current)
-                    current = pending[0]
+                    src, current = pending[0]
+                    chain.append(src)
                     continue
                 break
             else:
@@ -236,10 +262,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             result.redirect_chain = chain
             if blocked:  # a script/meta-refresh navigation was vetoed during load
                 raise RobotsBlocked(blocked[0])
-            # Immediate client-side navigations (script / meta refresh) are allowed to land, each
-            # robots-checked and paced by the handler; then navigation is frozen so every capture
-            # below describes one document.
-            page.wait_for_timeout(SETTLE_MS)
+            # Navigation is now frozen so every capture below describes one document.
             frozen["on"] = True
             if blocked:
                 raise RobotsBlocked(blocked[0])
@@ -316,7 +339,8 @@ def collect_diagnostics(
 
     try:
         crawler = crawler or PoliteCrawler()
-        if not crawler.allowed(url):
+        if not paced_allowed(url, crawler.allowed, crawler.robots_cached,
+                             crawler.wait_for_domain, crawler.record_request):
             return finish(DiagnosticReport(domain=domain, url=url, status="blocked", error="robots_disallow"))
 
         report = DiagnosticReport(domain=domain, url=url, status="error")
@@ -333,7 +357,7 @@ def collect_diagnostics(
             crawler.wait_for_domain(parsed.netloc.lower())
             try:
                 browsed = browse_fn(url, Path(output_dir), _safe_stem(domain), crawler.allowed,
-                                   crawler.wait_for_domain, crawler.record_request)
+                                   crawler.wait_for_domain, crawler.record_request, crawler.robots_cached)
             except RobotsBlocked as exc:
                 report.status, report.error = "blocked", f"robots_disallow: {exc}"
                 return finish(report)
