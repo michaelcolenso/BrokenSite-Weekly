@@ -52,10 +52,15 @@ class PoliteCrawler:
     _robots: dict[str, RobotsCacheEntry] = field(default_factory=dict)
     _last_request_at: dict[str, float] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
+    _domain_locks: dict[str, Lock] = field(default_factory=dict)
     _domain_slots: BoundedSemaphore = field(default_factory=lambda: BoundedSemaphore(MAX_CONCURRENT_DOMAINS))
 
     def __post_init__(self) -> None:
         self.session.headers.update({"User-Agent": USER_AGENT})
+
+    def _domain_lock(self, domain: str) -> Lock:
+        with self._lock:
+            return self._domain_locks.setdefault(domain, Lock())
 
     def fetch(self, url: str, *, allow_binary: bool = False, method: str = "GET") -> FetchResult:
         parsed = urlparse(url)
@@ -63,7 +68,10 @@ class PoliteCrawler:
         if not domain:
             return FetchResult(url=url, status_code=None, error="invalid_url")
 
-        with self._domain_slots:
+        # One in-flight fetch per domain: serializes the robots-cache check, pacing wait, request
+        # and record, so concurrent threads can't both fetch robots.txt or both skip the delay.
+        # Taken before the slot so threads queued on one domain don't hold global slots.
+        with self._domain_lock(domain), self._domain_slots:
             # robots.txt is a request to the domain too (HANDOFF rule 4): pace it when it has
             # to be fetched, and record it so the page fetch below waits a full delay after it.
             if not self.robots_cached(url):

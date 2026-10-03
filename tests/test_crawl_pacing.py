@@ -84,3 +84,39 @@ def test_different_domains_are_not_delayed_by_each_other(clock):
     crawler.fetch("https://b.example/")
     robots_b = [c for c in crawler.session.calls if c[0] == "robots" and "b.example" in c[1]][0]
     assert robots_b[2] == start  # first request to b.example is immediate
+
+
+def test_concurrent_fetches_of_one_uncached_domain_fetch_robots_once_and_stay_paced(monkeypatch):
+    import threading
+    import time as real_time
+
+    monkeypatch.setattr(crawl, "DOMAIN_DELAY_SECONDS", 0.3)
+    session = FakeSession(SimpleNamespace(now=0.0))
+    stamps = []
+    lock = threading.Lock()
+
+    def get(url, timeout=None):
+        real_time.sleep(0.05)  # widen the window in which a second thread could slip in
+        with lock:
+            stamps.append(("robots", real_time.monotonic()))
+        return SimpleNamespace(status_code=200, text="User-agent: *\nAllow: /\n", headers={})
+
+    def request(method, url, timeout=None, allow_redirects=True):
+        with lock:
+            stamps.append(("page", real_time.monotonic()))
+        return SimpleNamespace(status_code=200, text="<html></html>", encoding=None, url=url,
+                               headers={"content-type": "text/html"})
+
+    session.get, session.request = get, request
+    crawler = PoliteCrawler(session=session)
+    threads = [threading.Thread(target=crawler.fetch, args=("https://example.com/p%d" % i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    stamps.sort(key=lambda s: s[1])
+    assert [k for k, _ in stamps].count("robots") == 1
+    times = [t for _, t in stamps]
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert all(g >= 0.3 - 0.02 for g in gaps), gaps  # every request >= delay after the previous
