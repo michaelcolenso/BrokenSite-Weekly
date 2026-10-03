@@ -18,6 +18,9 @@ fastapi>=0.104.0
 uvicorn>=0.24.0
 python-multipart>=0.0.9
 
+# Structured output schemas (scanner diagnostics + vision evaluator)
+pydantic>=2.0.0
+
 # No other dependencies - using stdlib for everything else:
 # - sqlite3 (database)
 # - smtplib (email)
