@@ -63,10 +63,20 @@ class PoliteCrawler:
         if not domain:
             return FetchResult(url=url, status_code=None, error="invalid_url")
 
-        if not self.allowed(url):
-            return FetchResult(url=url, status_code=None, error="robots_disallow", blocked=True)
-
         with self._domain_slots:
+            # robots.txt is a request to the domain too (HANDOFF rule 4): pace it when it has
+            # to be fetched, and record it so the page fetch below waits a full delay after it.
+            if not self.robots_cached(url):
+                self._wait_for_domain(domain)
+                try:
+                    allowed = self.allowed(url)
+                finally:
+                    self.record_request(domain)
+            else:
+                allowed = self.allowed(url)
+            if not allowed:
+                return FetchResult(url=url, status_code=None, error="robots_disallow", blocked=True)
+
             self._wait_for_domain(domain)
             try:
                 response = self.session.request(method, url, timeout=REQUEST_TIMEOUT_SECONDS, allow_redirects=True)
