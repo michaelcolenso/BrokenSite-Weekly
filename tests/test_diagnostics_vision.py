@@ -45,6 +45,9 @@ class Handler(BaseHTTPRequestHandler):
             body, code = OVERFLOW.encode(), 200
         elif path == "/noviewport":
             body, code = NO_VIEWPORT.encode(), 200
+        elif path == "/jsnav":
+            body = f"<html><body><script>location.href='http://127.0.0.1:{OTHER_PORT['p']}/secret'</script></body></html>".encode()
+            code = 200
         elif path == "/xredir":
             self.send_response(302)
             self.send_header("Location", f"http://127.0.0.1:{OTHER_PORT['p']}/secret")
@@ -57,6 +60,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/slow":
             time.sleep(3)
             body, code = b"<html>late</html>", 200
+        elif path == "/hop1":
+            self.send_response(301)
+            self.send_header("Location", "/redir")
+            self.end_headers()
+            return
         elif path == "/redir":
             self.send_response(301)
             self.send_header("Location", "/")
@@ -158,6 +166,29 @@ def test_robots_rechecked_on_cross_origin_redirect(server, tmp_path):
     assert r.status == "blocked" and "robots_disallow" in r.error
     assert r.screenshot_path is None
     assert "/secret" not in DisallowAllHandler.hits  # blocked page was never fetched
+
+
+def test_multi_hop_chain_every_hop_vetted_and_paced(server, tmp_path):
+    waits, vetted = [], []
+    res = collector.browse(f"http://{server}/hop1", tmp_path, "chain",
+                           lambda u: (vetted.append(u), True)[1], waits.append, lambda h: None)
+    assert res.http_status == 200 and len(res.redirect_chain) == 2
+    assert len(vetted) == 3 and len(waits) == 3  # /hop1, /redir, / each vetted and paced
+
+
+def test_robots_rechecked_on_client_side_navigation(server, tmp_path):
+    DisallowAllHandler.hits.clear()
+    r = collect(f"http://{server}/jsnav", tmp_path)
+    assert r.status == "blocked" and "robots_disallow" in r.error
+    assert "/secret" not in DisallowAllHandler.hits
+
+
+def test_every_navigation_hop_is_paced_and_recorded(server, tmp_path):
+    waits, records = [], []
+    browse = collector.browse
+    res = browse(f"http://{server}/redir", tmp_path, "pace", lambda u: True, waits.append, records.append)
+    assert res.http_status == 200 and len(res.redirect_chain) == 1
+    assert waits == records == [server, server]  # initial request + redirect hop
 
 
 def test_redirect_chain_recorded(server, tmp_path):

@@ -34,6 +34,7 @@ MOBILE_VIEWPORT = {"width": 390, "height": 844}
 NAV_TIMEOUT_MS = 15_000
 SSL_TIMEOUT_SECONDS = 10
 MAX_ATTEMPTS = 2
+MAX_REDIRECTS = 10
 BACKOFF_SECONDS = 2.0
 ASSET_TYPES = {"image", "stylesheet", "script", "font"}
 MAX_LISTED_ASSETS = 10
@@ -97,11 +98,13 @@ _CONTACT_JS = """() => ({
 _OVERFLOW_JS = "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
 
 
-def browse(url: str, out_dir: Path, stem: str, allow_fn=None) -> BrowseResult:
+def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, record_fn=None) -> BrowseResult:
     """Load `url` in headless Chromium and gather facts. May raise.
 
-    `allow_fn(url) -> bool` is consulted for every main-frame navigation
-    (including redirect hops); a disallowed hop is aborted and RobotsBlocked raised.
+    Every main-frame navigation (initial, redirect hop, JS or meta-refresh) is vetted with
+    `allow_fn(url) -> bool` (robots.txt); a disallowed one is aborted and RobotsBlocked raised.
+    `wait_fn(netloc)` / `record_fn(netloc)` pace each navigation's own host. Sub-resource
+    requests are not paced (documented limitation).
     """
     from playwright.sync_api import sync_playwright
 
@@ -119,6 +122,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None) -> BrowseResult:
             blocked: list[str] = []
 
             route_errors: list[str] = []
+            pending: list[str] = []
 
             def on_route(route):
                 req = route.request
@@ -126,17 +130,29 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None) -> BrowseResult:
                     route.continue_()
                     return
                 # route.continue_() follows redirects inside Chromium without calling this handler
-                # again. Fetch main-frame navigations with redirects off, vet the next hop, then hand
-                # the response to the browser; it re-requests the Location, which lands here again.
+                # again. Fetch navigations with redirects off and hand the response to the browser;
+                # it re-requests any Location, which lands here again, so every hop is vetted.
+                host = urlparse(req.url).netloc.lower()
                 try:
-                    resp = route.fetch(max_redirects=0)
+                    if not allow_fn(req.url):
+                        blocked.append(req.url)
+                        route.abort()
+                        return
+                    if wait_fn:
+                        wait_fn(host)
+                    try:
+                        resp = route.fetch(max_redirects=0)
+                    finally:
+                        if record_fn:
+                            record_fn(host)
                     location = resp.headers.get("location")
                     if 300 <= resp.status < 400 and location:
-                        target = urljoin(req.url, location)
-                        if not allow_fn(target):
-                            blocked.append(target)
-                            route.abort()
-                            return
+                        # Chromium would follow further hops without calling this handler, so
+                        # hand it a blank page and let browse() issue the next hop as its own
+                        # routed navigation (aborting instead leaves an error page that races it).
+                        pending.append(urljoin(req.url, location))
+                        route.fulfill(status=200, content_type="text/html", body="")
+                        return
                     route.fulfill(response=resp)
                 except Exception as exc:  # noqa: BLE001 - fail closed, surface via goto error
                     route_errors.append(f"{type(exc).__name__}: {exc}")
@@ -162,25 +178,32 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None) -> BrowseResult:
             page.on("requestfailed", on_failed)
             page.on("request", on_request)
 
-            try:
-                response = page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
-            except Exception:
-                if blocked:
-                    raise RobotsBlocked(blocked[0]) from None
-                if route_errors:
-                    raise RuntimeError(route_errors[0]) from None
-                raise
+            chain: list[str] = []
+            current = url
+            for _ in range(MAX_REDIRECTS + 1):
+                pending.clear()
+                try:
+                    response = page.goto(current, wait_until="load", timeout=NAV_TIMEOUT_MS)
+                except Exception:
+                    if blocked:
+                        raise RobotsBlocked(blocked[0]) from None
+                    if route_errors:
+                        raise RuntimeError(route_errors[0]) from None
+                    raise
+                if pending and not blocked:
+                    chain.append(current)
+                    current = pending[0]
+                    continue
+                break
+            else:
+                raise RuntimeError("too_many_redirects")
+            result.redirect_chain = chain
+            if blocked:  # a script/meta-refresh navigation was vetoed during load
+                raise RobotsBlocked(blocked[0])
             if response is None:
                 raise RuntimeError("no_response")
             result.http_status = response.status
             result.final_url = page.url
-
-            chain: list[str] = []
-            req = response.request
-            while req.redirected_from is not None:
-                req = req.redirected_from
-                chain.append(req.url)
-            result.redirect_chain = list(reversed(chain))
 
             out_dir.mkdir(parents=True, exist_ok=True)
             desktop_path = out_dir / f"{stem}-desktop.png"
@@ -201,6 +224,8 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None) -> BrowseResult:
             mobile_path = out_dir / f"{stem}-mobile.png"
             page.screenshot(path=str(mobile_path), type="png", full_page=False)
             result.mobile_screenshot_path = str(mobile_path)
+            if blocked:  # a delayed client-side navigation was vetoed
+                raise RobotsBlocked(blocked[0])
         finally:
             browser.close()
 
@@ -255,7 +280,8 @@ def collect_diagnostics(
         for attempt in range(1, MAX_ATTEMPTS + 1):
             crawler.wait_for_domain(parsed.netloc.lower())
             try:
-                browsed = browse_fn(url, Path(output_dir), _safe_stem(domain), crawler.allowed)
+                browsed = browse_fn(url, Path(output_dir), _safe_stem(domain), crawler.allowed,
+                                   crawler.wait_for_domain, crawler.record_request)
             except RobotsBlocked as exc:
                 report.status, report.error = "blocked", f"robots_disallow: {exc}"
                 return finish(report)
