@@ -38,4 +38,5 @@ class DiagnosticReport(BaseModel):
 
     screenshot_path: Optional[str] = None  # desktop 1440x900, above the fold
     mobile_screenshot_path: Optional[str] = None  # mobile 390x844
+    mobile_redirect_url: Optional[str] = None  # navigation the site attempted on resize (vetoed)
     execution_time_ms: int = 0

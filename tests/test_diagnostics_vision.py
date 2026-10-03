@@ -45,6 +45,10 @@ class Handler(BaseHTTPRequestHandler):
             body, code = OVERFLOW.encode(), 200
         elif path == "/noviewport":
             body, code = NO_VIEWPORT.encode(), 200
+        elif path == "/resizenav":
+            body = (b"<html><body><h1>desktop</h1><script>"
+                    b"window.addEventListener('resize',()=>{location.href='/clean'})</script></body></html>")
+            code = 200
         elif path == "/prenav":
             body = b"<html><body><img src='/missing.png'><script>location.href='/clean'</script></body></html>"
             code = 200
@@ -260,6 +264,19 @@ def test_ssl_false_when_https_input_downgrades_to_http(tmp_path):
     r = collect_diagnostics("https://example.com", tmp_path, crawler=FastCrawler(), browse_fn=lambda *a: browsed,
                             ssl_fn=lambda h, p: (True, None, None))
     assert r.ssl_valid is False and r.ssl_error == "no_https"
+
+
+def test_navigation_during_mobile_pass_is_vetoed(server, tmp_path):
+    r = collect(f"http://{server}/resizenav", tmp_path)
+    assert r.status == "ok" and r.final_url.endswith("/resizenav")
+    assert r.mobile_redirect_url and r.mobile_redirect_url.endswith("/clean")
+    assert Path(r.mobile_screenshot_path).stat().st_size > 0
+
+
+@pytest.mark.parametrize("bad", ["https://[bad", "http://[::1", "https://host:notaport/"])
+def test_malformed_urls_never_raise(tmp_path, bad):
+    r = collect(bad, tmp_path)
+    assert r.status == "error" and r.reachable is False
 
 
 def test_invalid_url_is_contained(tmp_path):

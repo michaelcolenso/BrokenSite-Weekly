@@ -57,6 +57,7 @@ class BrowseResult:
     contact_methods: list[ContactMethod] = field(default_factory=list)
     screenshot_path: Optional[str] = None
     mobile_screenshot_path: Optional[str] = None
+    mobile_redirect_url: Optional[str] = None
 
 
 def normalize_url(raw: str) -> str:
@@ -124,8 +125,19 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             route_errors: list[str] = []
             pending: list[str] = []
 
+            frozen = {"on": False}
+            frozen_hits: list[str] = []
+
             def on_route(route):
                 req = route.request
+                if frozen["on"] and req.is_navigation_request() and req.frame.parent_frame is None:
+                    # The mobile pass must measure the same document the desktop pass saw, so
+                    # veto navigations a resize handler triggers (e.g. redirect to an m. host).
+                    # ERR_ABORTED keeps the current document; the default error code would
+                    # commit an error page.
+                    frozen_hits.append(req.url)
+                    route.abort("aborted")
+                    return
                 if not (allow_fn and req.is_navigation_request() and req.frame.parent_frame is None):
                     route.continue_()
                     return
@@ -224,6 +236,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             # Mobile emulation on the already-loaded page (no second fetch). is_mobile can't be
             # toggled on a Playwright context, so use CDP (Chromium-only). This honours the
             # meta viewport: pages without one lay out at 980px, as on a phone.
+            frozen["on"] = True
             page.set_viewport_size(MOBILE_VIEWPORT)  # sizes the screenshot; CDP override sets mobile semantics
             cdp = context.new_cdp_session(page)
             cdp.send("Emulation.setDeviceMetricsOverride", {**MOBILE_VIEWPORT, "deviceScaleFactor": 1, "mobile": True})
@@ -232,6 +245,8 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             mobile_path = out_dir / f"{stem}-mobile.png"
             page.screenshot(path=str(mobile_path), type="png", full_page=False)
             result.mobile_screenshot_path = str(mobile_path)
+            if frozen_hits:
+                result.mobile_redirect_url = frozen_hits[0]
             if blocked:  # a delayed client-side navigation was vetoed
                 raise RobotsBlocked(blocked[0])
         finally:
@@ -261,8 +276,11 @@ def collect_diagnostics(
     """Collect ground-truth technical flags for `url`. Never raises."""
     started = time.monotonic()
     url = normalize_url(url)
-    parsed = urlparse(url)
-    domain = (parsed.hostname or "").lower()
+    try:
+        parsed = urlparse(url)
+        domain = (parsed.hostname or "").lower()
+    except ValueError:  # e.g. malformed bracketed IPv6 host
+        parsed, domain = None, ""
 
     def finish(report: DiagnosticReport) -> DiagnosticReport:
         report.execution_time_ms = int((time.monotonic() - started) * 1000)
@@ -333,6 +351,7 @@ def collect_diagnostics(
         report.contact_methods_found = browsed.contact_methods
         report.screenshot_path = browsed.screenshot_path
         report.mobile_screenshot_path = browsed.mobile_screenshot_path
+        report.mobile_redirect_url = browsed.mobile_redirect_url
         return finish(report)
     except Exception as exc:  # noqa: BLE001 - never raise
         logger.error("diagnostics crashed for %s: %s", domain, exc)
