@@ -219,3 +219,17 @@ def test_robots_redirect_into_a_host_another_worker_is_fetching_stays_paced(monk
     b_times = sorted(t for url, t in stamps if "b.example" in url)
     gaps = [y - x for x, y in zip(b_times, b_times[1:])]
     assert len(b_times) >= 3 and all(g >= 0.3 - 0.03 for g in gaps), gaps
+
+
+def test_late_waker_rechecks_the_slot_and_never_sends_within_a_delay_of_another_request(clock):
+    crawler = make(clock)
+    d = "example.com"
+    start_a = crawler._reserve_slot(d)  # reserved first...
+    start_b = crawler._reserve_slot(d)  # ...then second, one delay later
+    assert start_b - start_a >= DOMAIN_DELAY_SECONDS
+
+    crawler._await_slot(d, start_b)     # B is released on time
+    sent_b = clock.now
+    crawler._await_slot(d, start_a)     # A wakes late (stalled past its slot): must not fire right behind B
+    sent_a = clock.now
+    assert sent_a - sent_b >= DOMAIN_DELAY_SECONDS

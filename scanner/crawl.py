@@ -54,6 +54,7 @@ class PoliteCrawler:
     _last_request_at: dict[str, float] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
     _domain_locks: dict[str, Lock] = field(default_factory=dict)
+    _last_sent_at: dict[str, float] = field(default_factory=dict)
     _domain_slots: BoundedSemaphore = field(default_factory=lambda: BoundedSemaphore(MAX_CONCURRENT_DOMAINS))
 
     def __post_init__(self) -> None:
@@ -165,21 +166,36 @@ class PoliteCrawler:
             self._last_request_at[domain] = max(self._last_request_at.get(domain, 0.0), time.monotonic())
 
     def _wait_for_domain(self, domain: str) -> None:
-        """Wait for, and atomically reserve, this caller's request slot on `domain`.
+        """Wait for this caller's request slot on `domain`, then claim it.
 
-        The reservation is made under the lock, so concurrent callers (including ones arriving
-        from another domain's robots.txt redirect) queue one delay apart instead of all seeing
-        the same "last request" and firing together. Call once per request, immediately before
-        sending it; a second call without a request in between reserves a second slot.
+        Reservation (under the lock) queues concurrent callers one delay apart, including ones
+        arriving from another domain's robots.txt redirect. Waking up is re-validated against the
+        last request actually released (`_last_sent_at`): if a later reservation fired first because
+        this waiter was delayed, it waits out that request's delay too. Call once per request,
+        immediately before sending it; a second call without a request in between waits again.
         """
+        self._await_slot(domain, self._reserve_slot(domain))
+
+    def _reserve_slot(self, domain: str) -> float:
         with self._lock:
             now = time.monotonic()
             last = self._last_request_at.get(domain)
             start = now if last is None else max(now, last + DOMAIN_DELAY_SECONDS)
             self._last_request_at[domain] = start
-        delay = start - now
-        if delay > 0:
-            time.sleep(delay)
+        return start
+
+    def _await_slot(self, domain: str, start: float) -> None:
+        while True:
+            delay = start - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            with self._lock:
+                now = time.monotonic()
+                sent = self._last_sent_at.get(domain)
+                if sent is None or now - sent >= DOMAIN_DELAY_SECONDS:
+                    self._last_sent_at[domain] = now
+                    return
+                start = sent + DOMAIN_DELAY_SECONDS  # an earlier-woken request got in first
 
 
 class DomainThrottledSession(requests.Session):
