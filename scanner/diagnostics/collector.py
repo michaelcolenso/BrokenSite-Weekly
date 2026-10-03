@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from scanner.crawl import USER_AGENT, PoliteCrawler
 from scanner.diagnostics.schema import ContactMethod, DiagnosticReport
@@ -37,6 +37,10 @@ MAX_ATTEMPTS = 2
 BACKOFF_SECONDS = 2.0
 ASSET_TYPES = {"image", "stylesheet", "script", "font"}
 MAX_LISTED_ASSETS = 10
+
+
+class RobotsBlocked(Exception):
+    """A navigation (initial or redirect hop) targets a URL robots.txt disallows."""
 
 
 @dataclass
@@ -88,11 +92,17 @@ _CONTACT_JS = """() => ({
     f.querySelector('input:not([type=hidden]):not([type=search]), textarea, select')),
 })"""
 
-_OVERFLOW_JS = "() => document.documentElement.scrollWidth > window.innerWidth + 1"
+# clientWidth is the layout viewport (390 with a device-width meta tag, 980 without);
+# innerWidth would already be stretched to the content width in mobile mode.
+_OVERFLOW_JS = "() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1"
 
 
-def browse(url: str, out_dir: Path, stem: str) -> BrowseResult:
-    """Load `url` in headless Chromium and gather facts. May raise."""
+def browse(url: str, out_dir: Path, stem: str, allow_fn=None) -> BrowseResult:
+    """Load `url` in headless Chromium and gather facts. May raise.
+
+    `allow_fn(url) -> bool` is consulted for every main-frame navigation
+    (including redirect hops); a disallowed hop is aborted and RobotsBlocked raised.
+    """
     from playwright.sync_api import sync_playwright
 
     result = BrowseResult()
@@ -106,6 +116,33 @@ def browse(url: str, out_dir: Path, stem: str) -> BrowseResult:
             context = browser.new_context(viewport=DESKTOP_VIEWPORT, user_agent=USER_AGENT)
             page = context.new_page()
             page.set_default_timeout(NAV_TIMEOUT_MS)
+            blocked: list[str] = []
+
+            route_errors: list[str] = []
+
+            def on_route(route):
+                req = route.request
+                if not (allow_fn and req.is_navigation_request() and req.frame.parent_frame is None):
+                    route.continue_()
+                    return
+                # route.continue_() follows redirects inside Chromium without calling this handler
+                # again. Fetch main-frame navigations with redirects off, vet the next hop, then hand
+                # the response to the browser; it re-requests the Location, which lands here again.
+                try:
+                    resp = route.fetch(max_redirects=0)
+                    location = resp.headers.get("location")
+                    if 300 <= resp.status < 400 and location:
+                        target = urljoin(req.url, location)
+                        if not allow_fn(target):
+                            blocked.append(target)
+                            route.abort()
+                            return
+                    route.fulfill(response=resp)
+                except Exception as exc:  # noqa: BLE001 - fail closed, surface via goto error
+                    route_errors.append(f"{type(exc).__name__}: {exc}")
+                    route.abort()
+
+            context.route("**/*", on_route)
 
             def on_response(response):
                 req = response.request
@@ -125,7 +162,14 @@ def browse(url: str, out_dir: Path, stem: str) -> BrowseResult:
             page.on("requestfailed", on_failed)
             page.on("request", on_request)
 
-            response = page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
+            try:
+                response = page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
+            except Exception:
+                if blocked:
+                    raise RobotsBlocked(blocked[0]) from None
+                if route_errors:
+                    raise RuntimeError(route_errors[0]) from None
+                raise
             if response is None:
                 raise RuntimeError("no_response")
             result.http_status = response.status
@@ -146,7 +190,12 @@ def browse(url: str, out_dir: Path, stem: str) -> BrowseResult:
             contacts = page.evaluate(_CONTACT_JS)
             result.contact_methods = [m for m in ("phone", "email", "form") if contacts.get(m)]
 
-            page.set_viewport_size(MOBILE_VIEWPORT)
+            # Mobile emulation on the already-loaded page (no second fetch). is_mobile can't be
+            # toggled on a Playwright context, so use CDP (Chromium-only). This honours the
+            # meta viewport: pages without one lay out at 980px, as on a phone.
+            page.set_viewport_size(MOBILE_VIEWPORT)  # sizes the screenshot; CDP override sets mobile semantics
+            cdp = context.new_cdp_session(page)
+            cdp.send("Emulation.setDeviceMetricsOverride", {**MOBILE_VIEWPORT, "deviceScaleFactor": 1, "mobile": True})
             page.wait_for_timeout(250)  # let responsive CSS settle
             result.mobile_viewport_overflow = bool(page.evaluate(_OVERFLOW_JS))
             mobile_path = out_dir / f"{stem}-mobile.png"
@@ -206,7 +255,10 @@ def collect_diagnostics(
         for attempt in range(1, MAX_ATTEMPTS + 1):
             crawler.wait_for_domain(parsed.netloc.lower())
             try:
-                browsed = browse_fn(url, Path(output_dir), _safe_stem(domain))
+                browsed = browse_fn(url, Path(output_dir), _safe_stem(domain), crawler.allowed)
+            except RobotsBlocked as exc:
+                report.status, report.error = "blocked", f"robots_disallow: {exc}"
+                return finish(report)
             except Exception as exc:  # noqa: BLE001 - isolation boundary
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("diagnostics attempt %d failed for %s: %s", attempt, domain, last_error)

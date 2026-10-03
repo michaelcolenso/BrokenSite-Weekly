@@ -44,5 +44,7 @@ Exit 2 if vision is enabled and env validation fails.
 
 - Sub-resource requests the browser makes (CSS/images/scripts) are not paced by the 10s window.
 - `broken_asset_count` counts failed or 4xx/5xx image, stylesheet, script, font requests.
+- Robots.txt is re-checked on every main-frame redirect hop (the hop is vetted before the browser follows it). A blocked hop returns `status="blocked"`. Main-document fetches go through Playwright's request API, which has not been exercised against HTTPS sites with certificate errors or behind a proxy.
+- Mobile capture uses Chromium device-metrics emulation (`mobile: true`) on the already-loaded page, so no second fetch. Chromium-only; the User-Agent stays the honest scanner UA, so sites that vary on UA still serve the desktop variant.
 - `ssl_valid` is `false` for http-only sites (`ssl_error="no_https"`).
 - Model verdict quality is unmeasured: no labelled sample has been run. Check it against the manual verification sample before using it to filter leads.

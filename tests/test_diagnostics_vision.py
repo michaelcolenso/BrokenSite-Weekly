@@ -26,7 +26,11 @@ GOOD = """<!doctype html><html><head><meta name=viewport content="width=device-w
 <a href="tel:+15551234567">Call</a><a href="mailto:a@b.co">Mail</a>
 <form><input name=n><textarea name=m></textarea></form>
 <img src="/missing.png"></body></html>"""
-OVERFLOW = "<!doctype html><html><body><div style='width:900px;height:20px;background:red'>wide</div></body></html>"
+OVERFLOW = ("<!doctype html><html><head><meta name=viewport content='width=device-width'></head>"
+            "<body><div style='width:900px;height:20px;background:red'>wide</div></body></html>")
+# No viewport tag: a real phone lays out at 980px, so a 600px element does NOT overflow.
+NO_VIEWPORT = "<!doctype html><html><body><div style='width:600px;height:20px;background:red'>x</div></body></html>"
+OTHER_PORT = {}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -39,6 +43,13 @@ class Handler(BaseHTTPRequestHandler):
             body, code = b"User-agent: *\nAllow: /\n", 200
         elif path == "/overflow":
             body, code = OVERFLOW.encode(), 200
+        elif path == "/noviewport":
+            body, code = NO_VIEWPORT.encode(), 200
+        elif path == "/xredir":
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{OTHER_PORT['p']}/secret")
+            self.end_headers()
+            return
         elif path == "/404":
             body, code = b"<html><body>Not found</body></html>", 404
         elif path == "/500":
@@ -73,12 +84,32 @@ def _chromium_override():
     mp.undo()
 
 
+class DisallowAllHandler(BaseHTTPRequestHandler):
+    hits = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        DisallowAllHandler.hits.append(self.path)
+        body = b"User-agent: *\nDisallow: /\n" if self.path == "/robots.txt" else b"<html>secret</html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 @pytest.fixture(scope="module")
 def server():
     srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    other = ThreadingHTTPServer(("127.0.0.1", 0), DisallowAllHandler)
+    OTHER_PORT["p"] = other.server_port
+    for s_ in (srv, other):
+        threading.Thread(target=s_.serve_forever, daemon=True).start()
     yield f"127.0.0.1:{srv.server_port}"
     srv.shutdown()
+    other.shutdown()
 
 
 class FastCrawler(PoliteCrawler):
@@ -108,6 +139,25 @@ def test_healthy_page_reports_contacts_assets_screenshots(server, tmp_path):
 
 def test_mobile_overflow_detected(server, tmp_path):
     assert collect(f"http://{server}/overflow", tmp_path).mobile_viewport_overflow is True
+
+
+def test_mobile_capture_uses_real_mobile_viewport_semantics(server, tmp_path):
+    # Without a viewport tag a phone lays out at 980px: a 600px element is not overflow.
+    # (A plain narrowed desktop window would wrongly report overflow here.)
+    r = collect(f"http://{server}/noviewport", tmp_path)
+    assert r.status == "ok" and r.mobile_viewport_overflow is False
+    # Screenshot is phone-sized: PNG IHDR width/height.
+    import struct
+    w, h = struct.unpack(">II", Path(r.mobile_screenshot_path).read_bytes()[16:24])
+    assert (w, h) == (390, 844)
+
+
+def test_robots_rechecked_on_cross_origin_redirect(server, tmp_path):
+    DisallowAllHandler.hits.clear()
+    r = collect(f"http://{server}/xredir", tmp_path)
+    assert r.status == "blocked" and "robots_disallow" in r.error
+    assert r.screenshot_path is None
+    assert "/secret" not in DisallowAllHandler.hits  # blocked page was never fetched
 
 
 def test_redirect_chain_recorded(server, tmp_path):
