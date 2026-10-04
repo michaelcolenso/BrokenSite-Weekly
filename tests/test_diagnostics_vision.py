@@ -16,7 +16,7 @@ import requests
 
 from scanner.crawl import PoliteCrawler
 from scanner.diagnostics import collector
-from scanner.diagnostics.guard import RobotsBlocked
+from scanner.diagnostics.guard import RobotsBlocked, _with_base
 from scanner.screenshot import capture_homepage
 from scanner.diagnostics.collector import collect_diagnostics
 from scanner.diagnostics.schema import DiagnosticReport
@@ -36,6 +36,7 @@ OTHER_PORT = {}
 
 
 class Handler(BaseHTTPRequestHandler):
+    popup_hits = []  # requests for the popup targets
     final_hits = []  # requests for the redirect target document (/sub/framefinal)
     pic_hits = []   # paths requested for the relative image in the redirected iframe
     loop_hits = []  # requests for /frameloop
@@ -76,6 +77,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/pic.png", "/sub/pic.png"):
             Handler.pic_hits.append(path)
             body, code = b"nope", 404
+        elif path == "/popuppage":  # opens a popup whose initial document redirects
+            body = b"<html><body><h1>home</h1><script>window.open('/popupredir')</script></body></html>"
+            code = 200
+        elif path == "/popupredir":
+            Handler.popup_hits.append(1)
+            self.send_response(302)
+            self.send_header("Location", "/clean")
+            self.end_headers()
+            return
         elif path == "/sandboxhop":  # sandboxed iframe, no allow-scripts: injected JS could not run
             body, code = b"<html><body><iframe sandbox src='/framehop2'></iframe></body></html>", 200
         elif path == "/hopframe2":
@@ -597,3 +607,37 @@ def test_redirecting_sandboxed_iframe_without_allow_scripts_still_loads_its_targ
     r = collect(f"http://{server}/sandboxhop", tmp_path)
     assert r.status == "ok"
     assert Handler.final_hits  # the redirect target's document was fetched and delivered
+
+
+def test_popup_navigation_cannot_replace_the_captured_page(server, tmp_path):
+    Handler.popup_hits.clear()
+    r = collect(f"http://{server}/popuppage", tmp_path)
+    assert r.status == "ok" and r.final_url.endswith("/popuppage")  # not the popup's /clean
+    assert Handler.popup_hits == []  # the popup's document was never even fetched
+
+
+def test_with_base_injects_after_doctype():
+    out = _with_base(b"<!DOCTYPE html><html><head></head><body></body></html>", "http://h/sub/final")
+    assert out.startswith(b'<!DOCTYPE html><base href="http://h/sub/final">')
+
+
+def test_with_base_without_doctype_prepends():
+    assert _with_base(b"<html></html>", "http://h/x").startswith(b'<base href="http://h/x"><html>')
+
+
+def test_with_base_resolves_an_existing_relative_base_against_the_final_url():
+    body = b'<html><head><base href="assets/"></head><body></body></html>'
+    out = _with_base(body, "http://h/sub/final")
+    assert b'<base href="http://h/sub/assets/">' in out and out.count(b"<base") == 1
+
+
+def test_with_base_handles_single_quoted_unquoted_and_absolute_bases():
+    assert b"http://h/sub/a/" in _with_base(b"<base href='a/'>", "http://h/sub/final")
+    assert b"http://h/sub/a/" in _with_base(b"<base href=a/>", "http://h/sub/final")
+    absolute = _with_base(b'<base href="http://other/x/">', "http://h/sub/final")
+    assert b'href="http://other/x/"' in absolute
+
+
+def test_with_base_injects_when_the_existing_base_has_no_href():
+    out = _with_base(b'<head><base target="_blank"></head>', "http://h/sub/final")
+    assert b'<base href="http://h/sub/final">' in out and b'target="_blank"' in out

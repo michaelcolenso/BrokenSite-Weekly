@@ -23,16 +23,24 @@ from urllib.parse import urljoin, urlparse
 
 
 _DOCTYPE = re.compile(rb"\s*<!doctype[^>]*>", re.I)
+# The first <base> element that has an href decides the document base URL.
+_BASE_HREF = re.compile(
+    rb"(<base\b[^>]*?\bhref\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
 
 
 def _with_base(body: bytes, url: str) -> bytes:
-    """Inject <base href=url> into an HTML document (after any doctype, so quirks mode is not
-    triggered). A document that sets its own <base> is left alone."""
-    if re.search(rb"<base[\s>]", body, re.I):
-        return body
+    """Make an HTML document that is committed under a different URL than the one it was fetched
+    from resolve relative URLs against `url`. An existing <base href> is resolved against `url`
+    (it was written relative to where the page really lives); otherwise <base href=url> is
+    injected after any doctype, so quirks mode is not triggered."""
+    m = _BASE_HREF.search(body)
+    if m:
+        original = (m.group(2) or m.group(3) or m.group(4) or b"").decode("utf-8", "replace")
+        resolved = html.escape(urljoin(url, html.unescape(original)), quote=True).encode("utf-8")
+        return body[:m.start()] + m.group(1) + b'"' + resolved + b'"' + body[m.end():]
     tag = b'<base href="' + html.escape(url, quote=True).encode("utf-8") + b'">'
-    m = _DOCTYPE.match(body)
-    at = m.end() if m else 0
+    d = _DOCTYPE.match(body)
+    at = d.end() if d else 0
     return body[:at] + tag + body[at:]
 
 
@@ -63,7 +71,17 @@ class GuardedNavigator:
         self.pending: list[tuple[str, str]] = []  # (redirecting URL, redirect target)
         self.frozen = False
         self.frozen_hits: list[str] = []      # navigations attempted after freeze() (vetoed)
+        self.popup_hits: list[str] = []       # navigations of other pages (popups) (vetoed)
         context.route("**/*", self._on_route)
+        # The captured page is the only page that may navigate: close anything it opens (popups).
+        context.on("page", lambda popup: self._close_popup(popup))
+
+    @staticmethod
+    def _close_popup(popup) -> None:
+        try:
+            popup.close()
+        except Exception:  # noqa: BLE001 - already closed
+            pass
 
     def freeze(self) -> None:
         """Veto every further main-frame navigation (late timers, resize handlers)."""
@@ -73,9 +91,26 @@ class GuardedNavigator:
         req = route.request
         try:
             is_nav = req.is_navigation_request()
-            main_frame_nav = is_nav and req.frame.parent_frame is None
-        except Exception:  # noqa: BLE001 - e.g. a service-worker-owned request has no frame
+        except Exception:  # noqa: BLE001
             route.continue_()
+            return
+        try:
+            frame = req.frame
+        except Exception:  # noqa: BLE001 - Playwright: no frame yet (a popup's first navigation) or a worker
+            frame = None
+        if frame is None:
+            if is_nav:
+                # A popup's initial navigation: nothing outside the captured page needs fetching
+                # for a screenshot, and its redirect state must not leak into the captured page's.
+                self.popup_hits.append(req.url)
+                route.abort("aborted")
+            else:
+                route.continue_()  # e.g. a service-worker-owned request
+            return
+        main_frame_nav = is_nav and frame.parent_frame is None
+        if is_nav and frame.page is not self.page:
+            self.popup_hits.append(req.url)  # another page's navigation: veto, same reasoning
+            route.abort("aborted")
             return
         # Child-frame (iframe) documents are navigations too, but the screenshot exception in
         # HANDOFF rule 4 treats them as embedded content, so only the main frame is guarded.
