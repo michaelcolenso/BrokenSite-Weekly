@@ -19,25 +19,68 @@ from __future__ import annotations
 
 import html
 import re
+from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 
 _DOCTYPE = re.compile(rb"\s*<!doctype[^>]*>", re.I)
-# The first <base> element that has an href decides the document base URL.
-_BASE_HREF = re.compile(
-    rb"(<base\b[^>]*?\bhref\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
+_HREF_ATTR = re.compile(rb"(\bhref\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
+
+
+class _BaseFinder(HTMLParser):
+    """Finds the first *active* <base href>: not inside a comment, script/style, or <template>."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.template_depth = 0
+        self.found = None  # (line, column, raw tag text)
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "template":
+            self.template_depth += 1
+        elif tag == "base" and self.found is None and self.template_depth == 0:
+            if any(k == "href" and v is not None for k, v in attrs):
+                self.found = (*self.getpos(), self.get_starttag_text())
+
+    def handle_endtag(self, tag):
+        if tag == "template" and self.template_depth:
+            self.template_depth -= 1
+
+
+def _find_active_base(body: bytes):
+    """Return (offset, raw tag bytes) of the document's active <base href>, or None.
+    The body is parsed as latin-1 so every character is exactly one byte and offsets map back."""
+    text = body.decode("latin-1")
+    finder = _BaseFinder()
+    try:
+        finder.feed(text)
+        finder.close()
+    except Exception:  # noqa: BLE001 - malformed markup: treat as having no base
+        return None
+    if finder.found is None:
+        return None
+    line, col, raw = finder.found
+    offset = sum(len(l) + 1 for l in text.split("\n")[: line - 1]) + col
+    raw_bytes = raw.encode("latin-1")
+    if body[offset: offset + len(raw_bytes)] != raw_bytes:
+        return None
+    return offset, raw_bytes
 
 
 def _with_base(body: bytes, url: str) -> bytes:
     """Make an HTML document that is committed under a different URL than the one it was fetched
-    from resolve relative URLs against `url`. An existing <base href> is resolved against `url`
-    (it was written relative to where the page really lives); otherwise <base href=url> is
-    injected after any doctype, so quirks mode is not triggered."""
-    m = _BASE_HREF.search(body)
-    if m:
-        original = (m.group(2) or m.group(3) or m.group(4) or b"").decode("utf-8", "replace")
-        resolved = html.escape(urljoin(url, html.unescape(original)), quote=True).encode("utf-8")
-        return body[:m.start()] + m.group(1) + b'"' + resolved + b'"' + body[m.end():]
+    from resolve relative URLs against `url`. An active <base href> is resolved against `url` (it
+    was written relative to where the page really lives); otherwise <base href=url> is injected
+    after any doctype, so quirks mode is not triggered."""
+    hit = _find_active_base(body)
+    if hit:
+        offset, raw = hit
+        m = _HREF_ATTR.search(raw)
+        if m:
+            original = (m.group(2) or m.group(3) or m.group(4) or b"").decode("utf-8", "replace")
+            resolved = html.escape(urljoin(url, html.unescape(original)), quote=True).encode("utf-8")
+            new_raw = raw[:m.start()] + m.group(1) + b'"' + resolved + b'"' + raw[m.end():]
+            return body[:offset] + new_raw + body[offset + len(raw):]
     tag = b'<base href="' + html.escape(url, quote=True).encode("utf-8") + b'">'
     d = _DOCTYPE.match(body)
     at = d.end() if d else 0
@@ -45,14 +88,24 @@ def _with_base(body: bytes, url: str) -> bytes:
 
 
 def _relax_base_uri(csp: str) -> str:
-    """Drop the base-uri directive from a Content-Security-Policy value. Chromium would otherwise
-    reject the <base> element _with_base() injects; the directive governs nothing else."""
-    kept = [d.strip() for d in csp.split(";") if d.strip() and not d.strip().lower().startswith("base-uri")]
-    return "; ".join(kept)
+    """Drop the base-uri directive from a Content-Security-Policy header value. Chromium would
+    otherwise reject the <base> element _with_base() injects; the directive governs nothing else.
+    Several policies may be comma-joined in one value; each keeps its other directives."""
+    policies = []
+    for policy in csp.split(","):
+        kept = [d.strip() for d in policy.split(";")
+                if d.strip() and not d.strip().lower().startswith("base-uri")]
+        if kept:
+            policies.append("; ".join(kept))
+    return ", ".join(policies)
 
 
 class RobotsBlocked(Exception):
     """A navigation (initial or redirect hop) targets a URL robots.txt disallows."""
+
+
+class FormPostBlocked(Exception):
+    """The page tried to submit a form (a top-level non-GET navigation). We never send those."""
 
 
 class GuardedNavigator:
@@ -79,6 +132,7 @@ class GuardedNavigator:
         self.frozen = False
         self.frozen_hits: list[str] = []      # navigations attempted after freeze() (vetoed)
         self.popup_hits: list[str] = []       # navigations of other pages (popups) (vetoed)
+        self.post_hits: list[str] = []        # top-level non-GET navigations (form posts) (vetoed)
         context.route("**/*", self._on_route)
         # The captured page is the only page that may navigate: close anything it opens (popups).
         context.on("page", lambda popup: self._close_popup(popup))
@@ -119,16 +173,25 @@ class GuardedNavigator:
             self.popup_hits.append(req.url)  # another page's navigation: veto, same reasoning
             route.abort("aborted")
             return
-        # Child-frame (iframe) documents are navigations too, but the screenshot exception in
-        # HANDOFF rule 4 treats them as embedded content, so only the main frame is guarded.
-        if self.allow_fn and is_nav and not main_frame_nav:
-            self._pass_through(route)
-            return
         if self.frozen and main_frame_nav:
             # After the settle window every capture must describe one document. ERR_ABORTED keeps
             # the current document; the default error code would commit an error page.
             self.frozen_hits.append(req.url)
             route.abort("aborted")
+            return
+        if main_frame_nav and req.method != "GET":
+            # A page that submits a form on its own. A screenshot never submits forms (and a
+            # 307/308 redirect of a POST could not be followed faithfully by a GET), so the request
+            # is never sent. It is answered with a stub document rather than aborted or 204'd,
+            # because either of those leaves a pending goto() hanging until its timeout; goto()
+            # then raises FormPostBlocked so the stub is never mistaken for the page.
+            self.post_hits.append(req.url)
+            route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>blocked</title>")
+            return
+        # Child-frame (iframe) documents are navigations too, but the screenshot exception in
+        # HANDOFF rule 4 treats them as embedded content, so only the main frame is guarded.
+        if self.allow_fn and is_nav and not main_frame_nav:
+            self._pass_through(route)
             return
         if not (self.allow_fn and main_frame_nav):
             route.continue_()
@@ -194,7 +257,7 @@ class GuardedNavigator:
 
     def goto(self, url: str) -> list[str]:
         """Load `url`, following redirects hop by hop and letting immediate client-side
-        navigations land. Returns the redirect chain. Raises RobotsBlocked, or RuntimeError for
+        navigations land. Returns the redirect chain. Raises RobotsBlocked, FormPostBlocked, or RuntimeError for
         a handler failure or too many redirects; other navigation errors propagate unchanged."""
         chain: list[str] = []
         current = url
@@ -221,4 +284,6 @@ class GuardedNavigator:
             raise RuntimeError("too_many_redirects")
         if self.blocked:  # a script/meta-refresh navigation was vetoed during load
             raise RobotsBlocked(self.blocked[0])
+        if self.post_hits:
+            raise FormPostBlocked(self.post_hits[0])
         return chain

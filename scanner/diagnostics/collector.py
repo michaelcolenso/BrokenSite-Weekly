@@ -23,7 +23,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from scanner.crawl import USER_AGENT, PoliteCrawler
-from scanner.diagnostics.guard import GuardedNavigator, RobotsBlocked
+from scanner.diagnostics.guard import FormPostBlocked, GuardedNavigator, RobotsBlocked
 from scanner.diagnostics.schema import ContactMethod, DiagnosticReport
 
 import logging
@@ -273,6 +273,9 @@ def collect_diagnostics(
                                    crawler.wait_for_domain, crawler.record_request)
             except RobotsBlocked as exc:
                 report.status, report.error = "blocked", f"robots_disallow: {exc}"
+                return finish(report)
+            except FormPostBlocked as exc:
+                report.status, report.error = "blocked", f"form_post_blocked: {exc}"
                 return finish(report)
             except Exception as exc:  # noqa: BLE001 - isolation boundary
                 last_error = f"{type(exc).__name__}: {exc}"

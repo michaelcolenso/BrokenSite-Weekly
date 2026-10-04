@@ -36,6 +36,7 @@ OTHER_PORT = {}
 
 
 class Handler(BaseHTTPRequestHandler):
+    post_hits = []   # POSTs that reached the server
     popup_hits = []  # requests for the popup targets
     final_hits = []  # requests for the redirect target document (/sub/framefinal)
     pic_hits = []   # paths requested for the relative image in the redirected iframe
@@ -44,6 +45,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    def do_POST(self):
+        Handler.post_hits.append(self.path)
+        self.send_response(307)
+        self.send_header("Location", "/clean")
+        self.end_headers()
 
     def do_GET(self):
         path = self.path
@@ -77,6 +84,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/pic.png", "/sub/pic.png"):
             Handler.pic_hits.append(path)
             body, code = b"nope", 404
+        elif path == "/postpage":  # auto-submits a form: POST /postsink, which 307-redirects
+            body = (b"<html><body><h1>interstitial</h1><form method=post action='/postsink'>"
+                    b"<input name=a value=1></form><script>document.forms[0].submit()</script></body></html>")
+            code = 200
         elif path == "/popuppage":  # opens a popup whose initial document redirects
             body = b"<html><body><h1>home</h1><script>window.open('/popupredir')</script></body></html>"
             code = 200
@@ -672,3 +683,40 @@ def test_relax_base_uri_drops_only_that_directive():
     assert _relax_base_uri("default-src 'self'; BASE-URI 'self'") == "default-src 'self'"
     assert _relax_base_uri("default-src 'self'") == "default-src 'self'"
     assert _relax_base_uri("base-uri 'none'") == ""
+
+
+def test_a_page_that_auto_submits_a_form_does_not_get_its_post_sent(server, tmp_path):
+    Handler.post_hits.clear()
+    r = collect(f"http://{server}/postpage", tmp_path)
+    assert r.status == "blocked" and "form_post_blocked" in r.error
+    assert Handler.post_hits == []  # the POST never reached the server
+    assert r.screenshot_path is None  # and the stub page was never captured as if it were the site
+
+
+def test_capture_homepage_refuses_a_page_that_auto_submits_a_form(server, tmp_path):
+    from scanner.diagnostics.guard import FormPostBlocked
+    Handler.post_hits.clear()
+    out = tmp_path / "post.jpg"
+    with pytest.raises(FormPostBlocked):
+        capture_homepage(f"http://{server}/postpage", out, crawler=RecordingCrawler())
+    assert not out.exists() and Handler.post_hits == []
+
+
+def test_relax_base_uri_keeps_every_other_comma_joined_policy():
+    assert _relax_base_uri("base-uri 'none', script-src 'none'") == "script-src 'none'"
+    assert _relax_base_uri("script-src 'none'; base-uri 'self', img-src 'self'") == "script-src 'none', img-src 'self'"
+    assert _relax_base_uri("base-uri 'none', base-uri 'self'") == ""
+
+
+def test_with_base_ignores_inert_base_text_in_comments_scripts_and_templates():
+    for inert in (b'<!-- <base href="/old/"> -->',
+                  b'<script>var s = \'<base href="/old/">\';</script>',
+                  b'<template><base href="/old/"></template>'):
+        out = _with_base(b"<html><head>" + inert + b"</head></html>", "http://h/sub/final")
+        assert b'<base href="http://h/sub/final">' in out      # a real base was injected
+        assert b'href="/old/"' in out                          # and the inert text was left alone
+
+
+def test_with_base_still_rewrites_a_real_base_that_follows_a_comment():
+    out = _with_base(b'<head><!-- <base href="/c/"> --><base href="assets/"></head>', "http://h/sub/final")
+    assert b'<base href="http://h/sub/assets/">' in out and b'href="/c/"' in out and out.count(b"<base") == 2
