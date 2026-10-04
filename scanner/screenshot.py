@@ -11,6 +11,9 @@ def capture_homepage(url: str, output_path: str | Path) -> None:
     """Capture a 1280x800 JPEG screenshot using Playwright.
 
     Import is intentionally local so scanner checks can run without Playwright installed.
+
+    The browser's own sub-resource requests (CSS, images, scripts) are exempt from the per-domain
+    delay under the screenshot exception in HANDOFF hard rule 4.
     """
     from playwright.sync_api import sync_playwright
 

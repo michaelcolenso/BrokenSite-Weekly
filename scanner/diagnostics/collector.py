@@ -118,7 +118,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
     `allow_fn(url) -> bool` (robots.txt); a disallowed one is aborted and RobotsBlocked raised.
     `wait_fn(netloc)` reserves a request slot on, and `record_fn(netloc)` stamps, each navigation's
     own host. `allow_fn` is expected to pace its own robots.txt fetches (PoliteCrawler.allowed does). Sub-resource
-    requests are not paced (documented limitation).
+    requests are not paced: that is the screenshot exception in HANDOFF hard rule 4.
     """
     from playwright.sync_api import sync_playwright
 

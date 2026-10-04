@@ -13,7 +13,7 @@ BSW scans local business websites for objective technical breakage and packages 
 1. No automated outreach. Do not build cold-email senders, contact-form auto-submitters, LinkedIn bots, or SMS blasts.
 2. No anti-bot evasion. Do not implement CAPTCHA solving, fingerprint spoofing beyond one honest User-Agent, or proxy rotation for evasion. If blocked, skip and record `status: blocked`.
 3. Respect robots.txt for every crawl and cache robots.txt per domain for 24 hours.
-4. Rate limits: max 1 request per domain per 10 seconds; max 4 concurrent domains globally; total scan budget 2 requests/page, 3 pages/site.
+4. Rate limits: max 1 request per domain per 10 seconds; max 4 concurrent domains globally; total scan budget 2 requests/page, 3 pages/site. **Exception (screenshots, decided by Michael):** the sub-resources (CSS, images, scripts, fonts) a headless browser loads while rendering a screenshot do not count against the per-domain delay or the per-page request budget. Everything else stays bound by this rule: every document navigation (the initial URL, each redirect hop, any client-side navigation) and every robots.txt request is still paced, robots-checked and counted, and a screenshot comes from a single load of the page.
 5. User-Agent: `BSW-Scanner/1.0 (+https://brokensiteweekly.com/bot)`.
 6. Collect only business-public data: business name, public phone, public address, website URL. Do not scrape personal emails.
 7. Scope discipline: anything outside P0 goes in `PARKING-LOT.md`.
