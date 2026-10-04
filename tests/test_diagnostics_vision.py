@@ -16,6 +16,8 @@ import requests
 
 from scanner.crawl import PoliteCrawler
 from scanner.diagnostics import collector
+from scanner.diagnostics.guard import RobotsBlocked
+from scanner.screenshot import capture_homepage
 from scanner.diagnostics.collector import collect_diagnostics
 from scanner.diagnostics.schema import DiagnosticReport
 from scanner.evaluators import vision
@@ -454,3 +456,41 @@ def test_validate_vision_env():
     assert validate_vision_env({"ANTHROPIC_API_KEY": "k"}) == []
     assert validate_vision_env({}) == ["ANTHROPIC_API_KEY is not set"]
     assert len(validate_vision_env({"ANTHROPIC_API_KEY": "k", "BSW_VISION_MODEL": " "})) == 1
+
+
+# ---- v1 screenshot path (scanner.screenshot.capture_homepage) ---------------------------------
+
+class RecordingCrawler(FastCrawler):
+    def __init__(self):
+        super().__init__()
+        self.waits, self.records = [], []
+
+    def wait_for_domain(self, domain):
+        self.waits.append(domain)
+
+    def record_request(self, domain):
+        self.records.append(domain)
+
+
+def test_capture_homepage_writes_a_jpeg_and_paces_every_document_navigation(server, tmp_path):
+    crawler = RecordingCrawler()
+    out = tmp_path / "shots" / "site.jpg"
+    capture_homepage(f"http://{server}/redir", out, crawler=crawler)  # /redir -> / (one redirect hop)
+    assert out.read_bytes()[:2] == b"\xff\xd8"  # JPEG magic
+    assert crawler.waits == [server, server]  # initial request + the redirect hop
+    assert len(crawler.records) >= 2
+
+
+def test_capture_homepage_obeys_robots_on_a_redirect_target(server, tmp_path):
+    DisallowAllHandler.hits.clear()
+    out = tmp_path / "blocked.jpg"
+    with pytest.raises(RobotsBlocked):
+        capture_homepage(f"http://{server}/xredir", out, crawler=RecordingCrawler())
+    assert not out.exists()
+    assert "/secret" not in DisallowAllHandler.hits  # the disallowed page was never fetched
+
+
+def test_capture_homepage_vetoes_a_late_navigation_and_still_captures(server, tmp_path):
+    out = tmp_path / "late.jpg"
+    capture_homepage(f"http://{server}/verylatenav", out, crawler=RecordingCrawler())
+    assert out.stat().st_size > 0

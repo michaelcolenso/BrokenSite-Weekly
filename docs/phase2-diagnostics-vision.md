@@ -42,7 +42,7 @@ Exit 2 if vision is enabled and env validation fails.
 
 ## Caveats
 
-- Sub-resource requests the browser makes (CSS/images/scripts/fonts) are not paced by the 10s window. This is a permitted exception to HANDOFF hard rule 4 for screenshot rendering (owner decision); document navigations and robots.txt requests remain fully paced.
+- Sub-resource requests the browser makes (CSS/images/scripts/fonts) are not paced by the 10s window. This is a permitted exception to HANDOFF hard rule 4 for screenshot rendering (owner decision); document navigations and robots.txt requests remain fully paced. The diagnostics collector and the v1 screenshot path (`scanner/screenshot.py`) share one guarded navigator (`scanner/diagnostics/guard.py`) that robots-checks, paces and counts every document navigation, including redirect hops.
 - `broken_asset_count` counts failed or 4xx/5xx image, stylesheet, script, font requests.
 - Every main-frame navigation (initial, each redirect hop, JS/meta-refresh) is robots-checked, paced and recorded per its own host before it is fetched; redirects are followed by the collector, not by Chromium (max 10 hops). robots.txt fetches for newly seen origins are paced too. A blocked one returns `status="blocked"`. Main-document fetches go through Playwright's request API, which has not been exercised against HTTPS sites with certificate errors or behind a proxy.
 - After a 500ms settle window (immediate JS/meta-refresh navigations are followed), navigation is frozen so both screenshots and all metadata describe one document. A later navigation (late timer, resize handler redirecting to an `m.` host) is vetoed and reported as `blocked_navigation_url`. If the document still changes mid-capture the attempt fails and is retried once.

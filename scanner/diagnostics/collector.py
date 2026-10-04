@@ -20,9 +20,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from scanner.crawl import USER_AGENT, PoliteCrawler
+from scanner.diagnostics.guard import GuardedNavigator, RobotsBlocked
 from scanner.diagnostics.schema import ContactMethod, DiagnosticReport
 
 import logging
@@ -39,10 +40,6 @@ SETTLE_MS = 500  # let immediate JS / meta-refresh navigations land before captu
 BACKOFF_SECONDS = 2.0
 ASSET_TYPES = {"image", "stylesheet", "script", "font"}
 MAX_LISTED_ASSETS = 10
-
-
-class RobotsBlocked(Exception):
-    """A navigation (initial or redirect hop) targets a URL robots.txt disallows."""
 
 
 @dataclass
@@ -133,58 +130,10 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             context = browser.new_context(viewport=DESKTOP_VIEWPORT, user_agent=USER_AGENT)
             page = context.new_page()
             page.set_default_timeout(NAV_TIMEOUT_MS)
-            blocked: list[str] = []
-
-            route_errors: list[str] = []
-            pending: list[tuple[str, str]] = []  # (redirecting URL, redirect target)
-
-            frozen = {"on": False}
-            frozen_hits: list[str] = []
-
-            def on_route(route):
-                req = route.request
-                if frozen["on"] and req.is_navigation_request() and req.frame.parent_frame is None:
-                    # After the settle window every capture must describe one document, so veto
-                    # navigations a late timer or a resize handler triggers (e.g. redirect to an
-                    # m. host).
-                    # ERR_ABORTED keeps the current document; the default error code would
-                    # commit an error page.
-                    frozen_hits.append(req.url)
-                    route.abort("aborted")
-                    return
-                if not (allow_fn and req.is_navigation_request() and req.frame.parent_frame is None):
-                    route.continue_()
-                    return
-                # route.continue_() follows redirects inside Chromium without calling this handler
-                # again. Fetch navigations with redirects off and hand the response to the browser;
-                # it re-requests any Location, which lands here again, so every hop is vetted.
-                host = urlparse(req.url).netloc.lower()
-                try:
-                    if not allow_fn(req.url):
-                        blocked.append(req.url)
-                        route.abort()
-                        return
-                    if wait_fn:
-                        wait_fn(host)
-                    try:
-                        resp = route.fetch(max_redirects=0)
-                    finally:
-                        if record_fn:
-                            record_fn(host)
-                    location = resp.headers.get("location")
-                    if 300 <= resp.status < 400 and location:
-                        # Chromium would follow further hops without calling this handler, so
-                        # hand it a blank page and let browse() issue the next hop as its own
-                        # routed navigation (aborting instead leaves an error page that races it).
-                        pending.append((req.url, urljoin(req.url, location)))
-                        route.fulfill(status=200, content_type="text/html", body="")
-                        return
-                    route.fulfill(response=resp)
-                except Exception as exc:  # noqa: BLE001 - fail closed, surface via goto error
-                    route_errors.append(f"{type(exc).__name__}: {exc}")
-                    route.abort()
-
-            context.route("**/*", on_route)
+            nav = GuardedNavigator(
+                context, page, allow_fn=allow_fn, wait_fn=wait_fn, record_fn=record_fn,
+                nav_timeout_ms=NAV_TIMEOUT_MS, settle_ms=SETTLE_MS, max_redirects=MAX_REDIRECTS,
+            )
 
             # Tag each request with the document URL that issued it, so observations from a
             # document we later left (redirect hop, client-side navigation) are excluded.
@@ -208,7 +157,7 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             def on_response(response):
                 req = response.request
                 if req.is_navigation_request() and req.frame.parent_frame is None:
-                    if not pending:  # skip the blank page we serve for a redirect hop
+                    if not nav.pending:  # skip the blank page we serve for a redirect hop
                         doc["status"], doc["url"] = response.status, response.url
                     return
                 if req.resource_type in ASSET_TYPES and response.status >= 400:
@@ -222,36 +171,11 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             page.on("requestfailed", on_failed)
             page.on("request", on_request)
 
-            chain: list[str] = []
-            current = url
-            for _ in range(MAX_REDIRECTS + 1):
-                pending.clear()
-                try:
-                    response = page.goto(current, wait_until="load", timeout=NAV_TIMEOUT_MS)
-                except Exception:
-                    if blocked:
-                        raise RobotsBlocked(blocked[0]) from None
-                    if route_errors:
-                        raise RuntimeError(route_errors[0]) from None
-                    raise
-                if not pending:
-                    # Let immediate client-side navigations (script / meta refresh) land; each is
-                    # robots-checked and paced by the handler, and may itself be a redirect.
-                    page.wait_for_timeout(SETTLE_MS)
-                if pending and not blocked:
-                    src, current = pending[0]
-                    chain.append(src)
-                    continue
-                break
-            else:
-                raise RuntimeError("too_many_redirects")
-            result.redirect_chain = chain
-            if blocked:  # a script/meta-refresh navigation was vetoed during load
-                raise RobotsBlocked(blocked[0])
+            result.redirect_chain = nav.goto(url)
             # Navigation is now frozen so every capture below describes one document.
-            frozen["on"] = True
-            if blocked:
-                raise RobotsBlocked(blocked[0])
+            nav.freeze()
+            if nav.blocked:
+                raise RobotsBlocked(nav.blocked[0])
             if not doc["url"]:
                 raise RuntimeError("no_response")
             result.http_status, result.final_url = doc["status"], doc["url"]
@@ -277,10 +201,10 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
             mobile_path = out_dir / f"{stem}-mobile.png"
             page.screenshot(path=str(mobile_path), type="png", full_page=False)
             result.mobile_screenshot_path = str(mobile_path)
-            if frozen_hits:
-                result.blocked_navigation_url = frozen_hits[0]
-            if blocked:
-                raise RobotsBlocked(blocked[0])
+            if nav.frozen_hits:
+                result.blocked_navigation_url = nav.frozen_hits[0]
+            if nav.blocked:
+                raise RobotsBlocked(nav.blocked[0])
             if page.url.split("#")[0] != doc["url"].split("#")[0]:
                 raise RuntimeError("document_changed_during_capture")
         finally:
