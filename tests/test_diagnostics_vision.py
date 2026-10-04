@@ -36,6 +36,8 @@ OTHER_PORT = {}
 
 
 class Handler(BaseHTTPRequestHandler):
+    pic_hits = []   # paths requested for the relative image in the redirected iframe
+    loop_hits = []  # requests for /frameloop
     sw_hits = []  # requests for /sw.js: a registration attempt means service workers weren't blocked
 
     def log_message(self, *a):
@@ -55,6 +57,29 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/crossframe":  # iframe whose document is on an origin that disallows crawling
             body = f"<html><body><iframe src='http://127.0.0.1:{OTHER_PORT['p']}/framedoc'></iframe></body></html>".encode()
             code = 200
+        elif path in ("/framehop", "/frameloop"):
+            if path == "/frameloop":
+                Handler.loop_hits.append(1)
+            self.send_response(302)
+            self.send_header("Location", "/framepage" if path == "/framehop" else "/frameloop")
+            self.end_headers()
+            return
+        elif path == "/framehop2":  # redirects into a sub-directory so relative URLs expose a wrong base
+            self.send_response(302)
+            self.send_header("Location", "/sub/framefinal")
+            self.end_headers()
+            return
+        elif path == "/sub/framefinal":
+            body, code = b"<html><body><img src='pic.png'></body></html>", 200
+        elif path in ("/pic.png", "/sub/pic.png"):
+            Handler.pic_hits.append(path)
+            body, code = b"nope", 404
+        elif path == "/hopframe2":
+            body, code = b"<html><body><iframe src='/framehop2'></iframe></body></html>", 200
+        elif path == "/hopframe":
+            body, code = b"<html><body><iframe src='/framehop'></iframe></body></html>", 200
+        elif path == "/loopframe":
+            body, code = b"<html><body><iframe src='/frameloop'></iframe></body></html>", 200
         elif path == "/swpage":
             body = (b"<html><body><script>navigator.serviceWorker && "
                     b"navigator.serviceWorker.register('/sw.js').catch(()=>{})</script></body></html>")
@@ -534,3 +559,26 @@ def test_service_workers_are_blocked_so_they_cannot_serve_pages_past_the_guard(s
     assert r.status == "ok"
     capture_homepage(f"http://{server}/swpage", tmp_path / "sw.jpg", crawler=RecordingCrawler())
     assert Handler.sw_hits == []  # the worker script was never even requested
+
+
+def test_redirecting_iframe_commits_under_its_final_url(server, tmp_path):
+    # /hopframe embeds /framehop, which 302s to /framepage; only the *final* document loads the
+    # 404 image, so a count of 1 proves the redirect was followed and the final page rendered.
+    r = collect(f"http://{server}/hopframe", tmp_path)
+    assert r.status == "ok" and r.broken_asset_count == 1
+
+
+def test_iframe_redirect_loop_is_capped(server, tmp_path):
+    Handler.loop_hits.clear()
+    r = collect(f"http://{server}/loopframe", tmp_path)
+    assert r.status == "ok"
+    assert 1 <= len(Handler.loop_hits) <= collector.MAX_REDIRECTS + 2  # bounded, not endless
+
+
+def test_redirected_iframe_resolves_relative_urls_against_its_final_url(server, tmp_path):
+    Handler.pic_hits.clear()
+    r = collect(f"http://{server}/hopframe2", tmp_path)
+    assert r.status == "ok"
+    # Committed under /sub/framefinal, 'pic.png' is /sub/pic.png; committed under the original
+    # /framehop2 it would wrongly be /pic.png.
+    assert Handler.pic_hits == ["/sub/pic.png"]

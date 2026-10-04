@@ -6,8 +6,9 @@ on its own host and counted. Chromium would follow redirects internally without 
 this class takes over main-frame navigations: each one is fetched with redirects off, vetted, and
 handed to the browser; redirects are followed here, one routed navigation per hop.
 
-Sub-resources (CSS, images, scripts, fonts) and documents embedded in iframes are not touched:
-they are the screenshot exception in HANDOFF hard rule 4. Only main-frame navigations are guarded.
+Only top-level (main-frame) navigations are guarded. Every other request the page makes while it
+renders (sub-resources of any type, XHR/fetch, media, iframe documents) is the screenshot
+exception in HANDOFF hard rule 4 and is not paced or robots-checked.
 
 Used by the diagnostics collector and by scanner.screenshot. Callers must create their browser
 context with service_workers="block": requests handled by a service worker never reach the route
@@ -16,6 +17,7 @@ handler, so a worker could serve pages past these checks.
 
 from __future__ import annotations
 
+import json
 from urllib.parse import urljoin, urlparse
 
 
@@ -46,6 +48,7 @@ class GuardedNavigator:
         self.pending: list[tuple[str, str]] = []  # (redirecting URL, redirect target)
         self.frozen = False
         self.frozen_hits: list[str] = []      # navigations attempted after freeze() (vetoed)
+        self._child_hops: dict = {}           # iframe -> redirect hops served so far (loop cap)
         context.route("**/*", self._on_route)
 
     def freeze(self) -> None:
@@ -102,16 +105,33 @@ class GuardedNavigator:
             self.route_errors.append(f"{type(exc).__name__}: {exc}")
             route.abort()
 
-    @staticmethod
-    def _pass_through(route) -> None:
+    def _pass_through(self, route) -> None:
         """Serve an embedded (iframe) document unguarded, but through route.fetch/fulfill.
 
         route.continue_() is not an option: once the top-level document has been fulfilled by this
         handler, Chromium never finishes a cross-origin iframe navigation that is continued, and
-        every later screenshot times out. Fetch + fulfill (redirects followed by the fetch) works.
+        every later screenshot times out. The same happens if a 3xx is simply fulfilled (Chromium
+        follows it natively). Following redirects inside route.fetch() would load the right body
+        but commit it under the original URL. So a 3xx is answered with a tiny page that navigates
+        the frame to the target: the next hop is a fresh, routed navigation and commits under its
+        real URL. Hops per frame are capped so a redirect loop cannot hammer a site.
         """
+        req = route.request
         try:
-            route.fulfill(response=route.fetch())
+            resp = route.fetch(max_redirects=0)
+            location = resp.headers.get("location")
+            if 300 <= resp.status < 400 and location:
+                target = urljoin(req.url, location)
+                hops = self._child_hops.get(req.frame, 0) + 1
+                if urlparse(target).scheme not in ("http", "https") or hops > self.max_redirects:
+                    route.abort()
+                    return
+                self._child_hops[req.frame] = hops
+                literal = json.dumps(target).replace("<", "\\u003c")  # safe inside <script>
+                route.fulfill(status=200, content_type="text/html",
+                              body=f"<script>location.replace({literal})</script>")
+                return
+            route.fulfill(response=resp)
         except Exception:  # noqa: BLE001 - a frame that can't load stays blank; the page still captures
             route.abort()
 
