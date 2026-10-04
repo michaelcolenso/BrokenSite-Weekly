@@ -17,8 +17,23 @@ handler, so a worker could serve pages past these checks.
 
 from __future__ import annotations
 
-import json
+import html
+import re
 from urllib.parse import urljoin, urlparse
+
+
+_DOCTYPE = re.compile(rb"\s*<!doctype[^>]*>", re.I)
+
+
+def _with_base(body: bytes, url: str) -> bytes:
+    """Inject <base href=url> into an HTML document (after any doctype, so quirks mode is not
+    triggered). A document that sets its own <base> is left alone."""
+    if re.search(rb"<base[\s>]", body, re.I):
+        return body
+    tag = b'<base href="' + html.escape(url, quote=True).encode("utf-8") + b'">'
+    m = _DOCTYPE.match(body)
+    at = m.end() if m else 0
+    return body[:at] + tag + body[at:]
 
 
 class RobotsBlocked(Exception):
@@ -48,7 +63,6 @@ class GuardedNavigator:
         self.pending: list[tuple[str, str]] = []  # (redirecting URL, redirect target)
         self.frozen = False
         self.frozen_hits: list[str] = []      # navigations attempted after freeze() (vetoed)
-        self._child_hops: dict = {}           # iframe -> redirect hops served so far (loop cap)
         context.route("**/*", self._on_route)
 
     def freeze(self) -> None:
@@ -110,28 +124,23 @@ class GuardedNavigator:
 
         route.continue_() is not an option: once the top-level document has been fulfilled by this
         handler, Chromium never finishes a cross-origin iframe navigation that is continued, and
-        every later screenshot times out. The same happens if a 3xx is simply fulfilled (Chromium
-        follows it natively). Following redirects inside route.fetch() would load the right body
-        but commit it under the original URL. So a 3xx is answered with a tiny page that navigates
-        the frame to the target: the next hop is a fresh, routed navigation and commits under its
-        real URL. Hops per frame are capped so a redirect loop cannot hammer a site.
+        every later screenshot times out. Fulfilling a 3xx fails the same way (Chromium follows it
+        natively), and neither a script nor a meta refresh can drive a sandboxed iframe. So
+        redirects are followed inside route.fetch() (capped at max_redirects, so a loop makes a
+        bounded number of requests). The body is then committed under the original iframe URL;
+        to keep relative URLs resolving against the real page, a <base href> for the final URL is
+        injected into HTML responses. The frame's own URL and origin stay those of the original
+        request, which is acceptable for an embedded frame in a screenshot.
         """
         req = route.request
         try:
-            resp = route.fetch(max_redirects=0)
-            location = resp.headers.get("location")
-            if 300 <= resp.status < 400 and location:
-                target = urljoin(req.url, location)
-                hops = self._child_hops.get(req.frame, 0) + 1
-                if urlparse(target).scheme not in ("http", "https") or hops > self.max_redirects:
-                    route.abort()
-                    return
-                self._child_hops[req.frame] = hops
-                literal = json.dumps(target).replace("<", "\\u003c")  # safe inside <script>
-                route.fulfill(status=200, content_type="text/html",
-                              body=f"<script>location.replace({literal})</script>")
-                return
-            route.fulfill(response=resp)
+            resp = route.fetch(max_redirects=self.max_redirects)
+            if resp.url != req.url and "html" in resp.headers.get("content-type", "").lower():
+                headers = {k: v for k, v in resp.headers.items()
+                           if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")}
+                route.fulfill(status=resp.status, headers=headers, body=_with_base(resp.body(), resp.url))
+            else:
+                route.fulfill(response=resp)
         except Exception:  # noqa: BLE001 - a frame that can't load stays blank; the page still captures
             route.abort()
 

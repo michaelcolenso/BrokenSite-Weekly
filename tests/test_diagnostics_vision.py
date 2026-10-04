@@ -36,6 +36,7 @@ OTHER_PORT = {}
 
 
 class Handler(BaseHTTPRequestHandler):
+    final_hits = []  # requests for the redirect target document (/sub/framefinal)
     pic_hits = []   # paths requested for the relative image in the redirected iframe
     loop_hits = []  # requests for /frameloop
     sw_hits = []  # requests for /sw.js: a registration attempt means service workers weren't blocked
@@ -70,10 +71,13 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         elif path == "/sub/framefinal":
+            Handler.final_hits.append(1)
             body, code = b"<html><body><img src='pic.png'></body></html>", 200
         elif path in ("/pic.png", "/sub/pic.png"):
             Handler.pic_hits.append(path)
             body, code = b"nope", 404
+        elif path == "/sandboxhop":  # sandboxed iframe, no allow-scripts: injected JS could not run
+            body, code = b"<html><body><iframe sandbox src='/framehop2'></iframe></body></html>", 200
         elif path == "/hopframe2":
             body, code = b"<html><body><iframe src='/framehop2'></iframe></body></html>", 200
         elif path == "/hopframe":
@@ -582,3 +586,14 @@ def test_redirected_iframe_resolves_relative_urls_against_its_final_url(server, 
     # Committed under /sub/framefinal, 'pic.png' is /sub/pic.png; committed under the original
     # /framehop2 it would wrongly be /pic.png.
     assert Handler.pic_hits == ["/sub/pic.png"]
+
+
+def test_redirecting_sandboxed_iframe_without_allow_scripts_still_loads_its_target(server, tmp_path):
+    # Neither a script nor a meta refresh can drive a sandboxed iframe, so the redirect has to be
+    # followed outside the frame. (The frame's own image is not asserted: with loopback test
+    # servers Chromium's private-network-access rule blocks subresources of a fulfilled document in
+    # an opaque-origin frame; that does not apply to sites on public addresses.)
+    Handler.final_hits.clear()
+    r = collect(f"http://{server}/sandboxhop", tmp_path)
+    assert r.status == "ok"
+    assert Handler.final_hits  # the redirect target's document was fetched and delivered
