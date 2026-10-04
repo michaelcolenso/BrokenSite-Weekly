@@ -16,7 +16,8 @@ def capture_homepage(url: str, output_path: str | Path, *, crawler: PoliteCrawle
     HANDOFF hard rules 3 and 4: every document navigation (the URL, each redirect hop, any
     client-side navigation) is robots-checked and paced through the shared `crawler`, via
     GuardedNavigator. Only the browser's own sub-resource requests (CSS, images, scripts) are
-    exempt from the per-domain delay, under the screenshot exception in rule 4.
+    exempt from the per-domain delay, as are documents embedded in iframes, under the screenshot
+    exception in rule 4.
 
     Raises RobotsBlocked if robots.txt disallows the page or a redirect target.
     """

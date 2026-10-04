@@ -50,6 +50,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/settleredir":  # client-side nav whose target is itself a server redirect
             body = b"<html><body><script>setTimeout(()=>location.href='/redir',100)</script></body></html>"
             code = 200
+        elif path == "/crossframe":  # iframe whose document is on an origin that disallows crawling
+            body = f"<html><body><iframe src='http://127.0.0.1:{OTHER_PORT['p']}/framedoc'></iframe></body></html>".encode()
+            code = 200
         elif path == "/withframe":
             body, code = b"<html><body><iframe src='/framepage'></iframe></body></html>", 200
         elif path == "/framepage":
@@ -494,3 +497,22 @@ def test_capture_homepage_vetoes_a_late_navigation_and_still_captures(server, tm
     out = tmp_path / "late.jpg"
     capture_homepage(f"http://{server}/verylatenav", out, crawler=RecordingCrawler())
     assert out.stat().st_size > 0
+
+
+def test_iframe_documents_are_treated_as_embedded_content_not_guarded_navigations(server, tmp_path):
+    """Pins the HANDOFF rule 4 screenshot exception as written: documents embedded in iframes are
+    exempt like other embedded content, so a robots-disallowed iframe origin is still rendered."""
+    DisallowAllHandler.hits.clear()
+    out = tmp_path / "frame.jpg"
+    capture_homepage(f"http://{server}/crossframe", out, crawler=RecordingCrawler())
+    assert out.stat().st_size > 0
+    assert "/framedoc" in DisallowAllHandler.hits
+
+
+def test_collector_handles_a_page_with_a_cross_origin_iframe(server, tmp_path):
+    """Regression: a guarded top-level document plus a continued cross-origin iframe request used
+    to hang screenshots until the timeout (YouTube/Maps-style embeds)."""
+    r = collect(f"http://{server}/crossframe", tmp_path)
+    assert r.status == "ok" and r.http_status == 200
+    assert Path(r.screenshot_path).stat().st_size > 0 and Path(r.mobile_screenshot_path).stat().st_size > 0
+    assert r.execution_time_ms < 15000

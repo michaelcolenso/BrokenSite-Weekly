@@ -6,8 +6,8 @@ on its own host and counted. Chromium would follow redirects internally without 
 this class takes over main-frame navigations: each one is fetched with redirects off, vetted, and
 handed to the browser; redirects are followed here, one routed navigation per hop.
 
-Sub-resources (CSS, images, scripts, fonts) are not touched: they are the screenshot exception in
-HANDOFF hard rule 4.
+Sub-resources (CSS, images, scripts, fonts) and documents embedded in iframes are not touched:
+they are the screenshot exception in HANDOFF hard rule 4. Only main-frame navigations are guarded.
 
 Used by the diagnostics collector and by scanner.screenshot.
 """
@@ -52,7 +52,12 @@ class GuardedNavigator:
 
     def _on_route(self, route) -> None:
         req = route.request
+        # Child-frame (iframe) documents are navigations too, but the screenshot exception in
+        # HANDOFF rule 4 treats them as embedded content, so only the main frame is guarded.
         main_frame_nav = req.is_navigation_request() and req.frame.parent_frame is None
+        if self.allow_fn and req.is_navigation_request() and not main_frame_nav:
+            self._pass_through(route)
+            return
         if self.frozen and main_frame_nav:
             # After the settle window every capture must describe one document. ERR_ABORTED keeps
             # the current document; the default error code would commit an error page.
@@ -88,6 +93,19 @@ class GuardedNavigator:
             route.fulfill(response=resp)
         except Exception as exc:  # noqa: BLE001 - fail closed, surface via the goto error
             self.route_errors.append(f"{type(exc).__name__}: {exc}")
+            route.abort()
+
+    @staticmethod
+    def _pass_through(route) -> None:
+        """Serve an embedded (iframe) document unguarded, but through route.fetch/fulfill.
+
+        route.continue_() is not an option: once the top-level document has been fulfilled by this
+        handler, Chromium never finishes a cross-origin iframe navigation that is continued, and
+        every later screenshot times out. Fetch + fulfill (redirects followed by the fetch) works.
+        """
+        try:
+            route.fulfill(response=route.fetch())
+        except Exception:  # noqa: BLE001 - a frame that can't load stays blank; the page still captures
             route.abort()
 
     def goto(self, url: str) -> list[str]:
