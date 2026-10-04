@@ -44,6 +44,13 @@ def _with_base(body: bytes, url: str) -> bytes:
     return body[:at] + tag + body[at:]
 
 
+def _relax_base_uri(csp: str) -> str:
+    """Drop the base-uri directive from a Content-Security-Policy value. Chromium would otherwise
+    reject the <base> element _with_base() injects; the directive governs nothing else."""
+    kept = [d.strip() for d in csp.split(";") if d.strip() and not d.strip().lower().startswith("base-uri")]
+    return "; ".join(kept)
+
+
 class RobotsBlocked(Exception):
     """A navigation (initial or redirect hop) targets a URL robots.txt disallows."""
 
@@ -173,6 +180,12 @@ class GuardedNavigator:
             if resp.url != req.url and "html" in resp.headers.get("content-type", "").lower():
                 headers = {k: v for k, v in resp.headers.items()
                            if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")}
+                for key in [k for k in headers if k.lower() == "content-security-policy"]:
+                    relaxed = _relax_base_uri(headers[key])
+                    if relaxed:
+                        headers[key] = relaxed
+                    else:
+                        del headers[key]
                 route.fulfill(status=resp.status, headers=headers, body=_with_base(resp.body(), resp.url))
             else:
                 route.fulfill(response=resp)

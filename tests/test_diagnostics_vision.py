@@ -16,7 +16,7 @@ import requests
 
 from scanner.crawl import PoliteCrawler
 from scanner.diagnostics import collector
-from scanner.diagnostics.guard import RobotsBlocked, _with_base
+from scanner.diagnostics.guard import RobotsBlocked, _relax_base_uri, _with_base
 from scanner.screenshot import capture_homepage
 from scanner.diagnostics.collector import collect_diagnostics
 from scanner.diagnostics.schema import DiagnosticReport
@@ -88,6 +88,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         elif path == "/sandboxhop":  # sandboxed iframe, no allow-scripts: injected JS could not run
             body, code = b"<html><body><iframe sandbox src='/framehop2'></iframe></body></html>", 200
+        elif path == "/framehop3":  # redirects to a document whose own CSP forbids <base>
+            self.send_response(302)
+            self.send_header("Location", "/sub/cspframe")
+            self.end_headers()
+            return
+        elif path == "/sub/cspframe":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Security-Policy", "base-uri 'none'; img-src 'self'")
+            body = b"<html><body><img src='pic.png'></body></html>"
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        elif path == "/hopframe3":
+            body, code = b"<html><body><iframe src='/framehop3'></iframe></body></html>", 200
         elif path == "/hopframe2":
             body, code = b"<html><body><iframe src='/framehop2'></iframe></body></html>", 200
         elif path == "/hopframe":
@@ -641,3 +657,18 @@ def test_with_base_handles_single_quoted_unquoted_and_absolute_bases():
 def test_with_base_injects_when_the_existing_base_has_no_href():
     out = _with_base(b'<head><base target="_blank"></head>', "http://h/sub/final")
     assert b'<base href="http://h/sub/final">' in out and b'target="_blank"' in out
+
+
+def test_redirected_iframe_with_a_base_uri_csp_still_resolves_against_its_final_url(server, tmp_path):
+    Handler.pic_hits.clear()
+    r = collect(f"http://{server}/hopframe3", tmp_path)
+    assert r.status == "ok"
+    # With `base-uri 'none'` kept, Chromium would ignore the injected <base> and request /pic.png.
+    assert Handler.pic_hits == ["/sub/pic.png"]
+
+
+def test_relax_base_uri_drops_only_that_directive():
+    assert _relax_base_uri("base-uri 'none'; img-src 'self'") == "img-src 'self'"
+    assert _relax_base_uri("default-src 'self'; BASE-URI 'self'") == "default-src 'self'"
+    assert _relax_base_uri("default-src 'self'") == "default-src 'self'"
+    assert _relax_base_uri("base-uri 'none'") == ""
