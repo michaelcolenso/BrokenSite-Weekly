@@ -36,6 +36,8 @@ OTHER_PORT = {}
 
 
 class Handler(BaseHTTPRequestHandler):
+    sw_hits = []  # requests for /sw.js: a registration attempt means service workers weren't blocked
+
     def log_message(self, *a):
         pass
 
@@ -53,6 +55,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/crossframe":  # iframe whose document is on an origin that disallows crawling
             body = f"<html><body><iframe src='http://127.0.0.1:{OTHER_PORT['p']}/framedoc'></iframe></body></html>".encode()
             code = 200
+        elif path == "/swpage":
+            body = (b"<html><body><script>navigator.serviceWorker && "
+                    b"navigator.serviceWorker.register('/sw.js').catch(()=>{})</script></body></html>")
+            code = 200
+        elif path == "/sw.js":
+            Handler.sw_hits.append(1)
+            body, code = b"self.addEventListener('fetch', () => {});", 200
         elif path == "/withframe":
             body, code = b"<html><body><iframe src='/framepage'></iframe></body></html>", 200
         elif path == "/framepage":
@@ -102,7 +111,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             body, code = GOOD.encode(), 200
         self.send_response(code)
-        self.send_header("Content-Type", "text/html" if path not in ("/missing.png",) else "image/png")
+        self.send_header("Content-Type", "image/png" if path == "/missing.png"
+                         else "application/javascript" if path == "/sw.js" else "text/html")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -516,3 +526,11 @@ def test_collector_handles_a_page_with_a_cross_origin_iframe(server, tmp_path):
     assert r.status == "ok" and r.http_status == 200
     assert Path(r.screenshot_path).stat().st_size > 0 and Path(r.mobile_screenshot_path).stat().st_size > 0
     assert r.execution_time_ms < 15000
+
+
+def test_service_workers_are_blocked_so_they_cannot_serve_pages_past_the_guard(server, tmp_path):
+    Handler.sw_hits.clear()
+    r = collect(f"http://{server}/swpage", tmp_path)
+    assert r.status == "ok"
+    capture_homepage(f"http://{server}/swpage", tmp_path / "sw.jpg", crawler=RecordingCrawler())
+    assert Handler.sw_hits == []  # the worker script was never even requested

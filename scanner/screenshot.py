@@ -30,7 +30,9 @@ def capture_homepage(url: str, output_path: str | Path, *, crawler: PoliteCrawle
         # BSW_CHROMIUM_PATH: optional override when Playwright's pinned build isn't installed.
         browser = p.chromium.launch(executable_path=os.environ.get("BSW_CHROMIUM_PATH") or None)
         try:
-            context = browser.new_context(viewport={"width": 1280, "height": 800}, user_agent=USER_AGENT)
+            # service_workers="block": a service worker would serve pages past the route guard.
+            context = browser.new_context(viewport={"width": 1280, "height": 800}, user_agent=USER_AGENT,
+                                          service_workers="block")
             page = context.new_page()
             nav = GuardedNavigator(
                 context, page,

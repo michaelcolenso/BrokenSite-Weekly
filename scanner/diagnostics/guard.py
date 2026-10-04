@@ -9,7 +9,9 @@ handed to the browser; redirects are followed here, one routed navigation per ho
 Sub-resources (CSS, images, scripts, fonts) and documents embedded in iframes are not touched:
 they are the screenshot exception in HANDOFF hard rule 4. Only main-frame navigations are guarded.
 
-Used by the diagnostics collector and by scanner.screenshot.
+Used by the diagnostics collector and by scanner.screenshot. Callers must create their browser
+context with service_workers="block": requests handled by a service worker never reach the route
+handler, so a worker could serve pages past these checks.
 """
 
 from __future__ import annotations
@@ -52,10 +54,15 @@ class GuardedNavigator:
 
     def _on_route(self, route) -> None:
         req = route.request
+        try:
+            is_nav = req.is_navigation_request()
+            main_frame_nav = is_nav and req.frame.parent_frame is None
+        except Exception:  # noqa: BLE001 - e.g. a service-worker-owned request has no frame
+            route.continue_()
+            return
         # Child-frame (iframe) documents are navigations too, but the screenshot exception in
         # HANDOFF rule 4 treats them as embedded content, so only the main frame is guarded.
-        main_frame_nav = req.is_navigation_request() and req.frame.parent_frame is None
-        if self.allow_fn and req.is_navigation_request() and not main_frame_nav:
+        if self.allow_fn and is_nav and not main_frame_nav:
             self._pass_through(route)
             return
         if self.frozen and main_frame_nav:

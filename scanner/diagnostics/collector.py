@@ -127,7 +127,10 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
         # BSW_CHROMIUM_PATH: optional override when Playwright's pinned build isn't installed.
         browser = p.chromium.launch(executable_path=os.environ.get("BSW_CHROMIUM_PATH") or None)
         try:
-            context = browser.new_context(viewport=DESKTOP_VIEWPORT, user_agent=USER_AGENT)
+            # service_workers="block": requests a service worker handles are invisible to context.route,
+            # so a worker could serve pages past the robots and pacing guard.
+            context = browser.new_context(viewport=DESKTOP_VIEWPORT, user_agent=USER_AGENT,
+                                          service_workers="block")
             page = context.new_page()
             page.set_default_timeout(NAV_TIMEOUT_MS)
             nav = GuardedNavigator(
