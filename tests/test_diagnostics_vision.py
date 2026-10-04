@@ -16,7 +16,9 @@ import requests
 
 from scanner.crawl import PoliteCrawler
 from scanner.diagnostics import collector
-from scanner.diagnostics.guard import RobotsBlocked, _relax_base_uri, _with_base
+from scanner.diagnostics.guard import (
+    RobotsBlocked, _relax_base_uri, _rebase_headers, _rewrite_self, _with_base,
+)
 from scanner.screenshot import capture_homepage
 from scanner.diagnostics.collector import collect_diagnostics
 from scanner.diagnostics.schema import DiagnosticReport
@@ -113,6 +115,22 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        elif path == "/framehop5":  # final doc has base-uri 'none' AND its own <base href>
+            self.send_response(302)
+            self.send_header("Location", "/sub/cspbase")
+            self.end_headers()
+            return
+        elif path == "/sub/cspbase":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Security-Policy", "base-uri 'none'")
+            body = b"<html><head><base href='/evil/'></head><body><img src='pic.png'></body></html>"
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        elif path == "/hopframe5":
+            body, code = b"<html><body><iframe src='/framehop5'></iframe></body></html>", 200
         elif path == "/hopframe3":
             body, code = b"<html><body><iframe src='/framehop3'></iframe></body></html>", 200
         elif path == "/hopframe2":
@@ -720,3 +738,37 @@ def test_with_base_ignores_inert_base_text_in_comments_scripts_and_templates():
 def test_with_base_still_rewrites_a_real_base_that_follows_a_comment():
     out = _with_base(b'<head><!-- <base href="/c/"> --><base href="assets/"></head>', "http://h/sub/final")
     assert b'<base href="http://h/sub/assets/">' in out and b'href="/c/"' in out and out.count(b"<base") == 2
+
+
+def test_a_base_the_response_forbids_is_replaced_not_activated(server, tmp_path):
+    Handler.pic_hits.clear()
+    r = collect(f"http://{server}/hopframe5", tmp_path)
+    assert r.status == "ok"
+    # base-uri 'none' would natively reject the page's <base href="/evil/">; the image must load
+    # relative to the real final URL (/sub/), not /evil/ (which would record nothing here).
+    assert Handler.pic_hits == ["/sub/pic.png"]
+
+
+def test_with_base_ignore_existing_neutralises_the_pages_base_and_injects_ours():
+    out = _with_base(b'<head><base href="/evil/" target="_blank"></head>', "http://h/sub/final", ignore_existing=True)
+    assert b"/evil/" not in out and b'target="_blank"' in out
+    assert b'<base href="http://h/sub/final">' in out
+
+
+def test_rewrite_self_replaces_only_the_self_keyword():
+    out = _rewrite_self("default-src 'SELF' https://cdn.x; img-src 'self' data:", "http://b.example:8080")
+    assert out == "default-src http://b.example:8080 https://cdn.x; img-src http://b.example:8080 data:"
+
+
+def test_rebase_headers_across_origins_keeps_the_policy_but_points_self_at_the_final_origin():
+    headers = {"Content-Type": "text/html", "Content-Length": "9", "Content-Encoding": "gzip",
+               "Content-Security-Policy": "img-src 'self'; base-uri 'none'"}
+    out, had_base_uri = _rebase_headers(headers, "http://a.example/x", "http://b.example/y")
+    assert out == {"Content-Type": "text/html", "Content-Security-Policy": "img-src http://b.example"}
+    assert had_base_uri is True
+
+
+def test_rebase_headers_same_origin_leaves_self_alone():
+    out, had_base_uri = _rebase_headers({"Content-Security-Policy": "img-src 'self'"},
+                                        "http://a.example/x", "http://a.example/y")
+    assert out == {"Content-Security-Policy": "img-src 'self'"} and had_base_uri is False

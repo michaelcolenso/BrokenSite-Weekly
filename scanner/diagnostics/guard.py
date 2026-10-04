@@ -67,13 +67,20 @@ def _find_active_base(body: bytes):
     return offset, raw_bytes
 
 
-def _with_base(body: bytes, url: str) -> bytes:
+def _with_base(body: bytes, url: str, ignore_existing: bool = False) -> bytes:
     """Make an HTML document that is committed under a different URL than the one it was fetched
     from resolve relative URLs against `url`. An active <base href> is resolved against `url` (it
     was written relative to where the page really lives); otherwise <base href=url> is injected
-    after any doctype, so quirks mode is not triggered."""
+    after any doctype, so quirks mode is not triggered. With `ignore_existing`, an existing
+    <base href> is neutralised (its href removed) and ours is injected instead; used when the
+    response's own policy restricts <base>, which it would natively enforce on the page's base."""
     hit = _find_active_base(body)
-    if hit:
+    if hit and ignore_existing:
+        offset, raw = hit
+        m = _HREF_ATTR.search(raw)
+        if m:
+            body = body[:offset] + raw[:m.start()] + raw[m.end():] + body[offset + len(raw):]
+    elif hit:
         offset, raw = hit
         m = _HREF_ATTR.search(raw)
         if m:
@@ -98,6 +105,42 @@ def _relax_base_uri(csp: str) -> str:
         if kept:
             policies.append("; ".join(kept))
     return ", ".join(policies)
+
+
+_SELF = re.compile(r"'self'", re.I)
+
+
+def _origin(url: str) -> str:
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}"
+
+
+def _rewrite_self(csp: str, origin: str) -> str:
+    """Replace the 'self' source with a concrete origin."""
+    return _SELF.sub(origin, csp)
+
+
+def _rebase_headers(headers: dict, original_url: str, final_url: str):
+    """Headers for a response committed under `original_url` that was really served from
+    `final_url` (after redirects). Drops hop-by-hop/length headers (the body is re-sent), removes
+    the CSP base-uri directive (it would make Chromium reject our injected <base>), and, if the
+    redirect crossed origins, rewrites 'self' to the final origin so the policy still allows the
+    resources the final document actually loads. Returns (headers, had_base_uri)."""
+    out = {k: v for k, v in headers.items()
+           if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")}
+    had_base_uri = False
+    cross_origin = _origin(original_url) != _origin(final_url)
+    for key in [k for k in out if k.lower() == "content-security-policy"]:
+        value = out[key]
+        had_base_uri = had_base_uri or "base-uri" in value.lower()
+        value = _relax_base_uri(value)
+        if value and cross_origin:
+            value = _rewrite_self(value, _origin(final_url))
+        if value:
+            out[key] = value
+        else:
+            del out[key]
+    return out, had_base_uri
 
 
 class RobotsBlocked(Exception):
@@ -241,15 +284,9 @@ class GuardedNavigator:
         try:
             resp = route.fetch(max_redirects=self.max_redirects)
             if resp.url != req.url and "html" in resp.headers.get("content-type", "").lower():
-                headers = {k: v for k, v in resp.headers.items()
-                           if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")}
-                for key in [k for k in headers if k.lower() == "content-security-policy"]:
-                    relaxed = _relax_base_uri(headers[key])
-                    if relaxed:
-                        headers[key] = relaxed
-                    else:
-                        del headers[key]
-                route.fulfill(status=resp.status, headers=headers, body=_with_base(resp.body(), resp.url))
+                headers, had_base_uri = _rebase_headers(resp.headers, req.url, resp.url)
+                body = _with_base(resp.body(), resp.url, ignore_existing=had_base_uri)
+                route.fulfill(status=resp.status, headers=headers, body=body)
             else:
                 route.fulfill(response=resp)
         except Exception:  # noqa: BLE001 - a frame that can't load stays blank; the page still captures
