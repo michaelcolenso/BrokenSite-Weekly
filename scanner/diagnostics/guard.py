@@ -51,6 +51,16 @@ class _BaseFinder(HTMLParser):
             self.inert_depth -= 1
 
 
+def _fix_href_encoding(href: str) -> str:
+    """The body is parsed as latin-1, so raw UTF-8 bytes in an attribute arrive as mojibake while a
+    character reference (&eacute;) arrives already decoded. Undo the mojibake only when the value
+    is valid UTF-8 read that way; otherwise it is already the real text."""
+    try:
+        return href.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return href
+
+
 def _find_active_base(body: bytes):
     """Return (offset, raw tag bytes, parsed href) of the document's active <base href>, or None.
     The body is parsed as latin-1 so every character is exactly one byte and offsets map back."""
@@ -68,19 +78,22 @@ def _find_active_base(body: bytes):
     raw_bytes = raw.encode("latin-1")
     if body[offset: offset + len(raw_bytes)] != raw_bytes:
         return None
-    return offset, raw_bytes, href.encode("latin-1", "replace").decode("utf-8", "replace")
+    return offset, raw_bytes, _fix_href_encoding(href)
 
 
-def _with_base(body: bytes, url: str, ignore_existing: bool = False) -> bytes:
+def _with_base(body: bytes, url: str, ignore_existing: bool = False, keep_base=None) -> bytes:
     """Make an HTML document that is committed under a different URL than the one it was fetched
     from resolve relative URLs against `url`. An active <base href> is resolved against `url` (it
     was written relative to where the page really lives); otherwise <base href=url> is injected
     after any doctype, so quirks mode is not triggered. With `ignore_existing`, an existing
     <base href> is neutralised (its href removed) and ours is injected instead; used when the
-    response's own policy restricts <base>, which it would natively enforce on the page's base."""
+    response's own policy restricts <base>, which it would natively enforce on the page's base;
+    `keep_base(resolved_href)` may return True to keep a base that policy would have permitted."""
     hit = _find_active_base(body)
     if hit:
         offset, raw, original = hit
+        if ignore_existing and keep_base is not None and keep_base(urljoin(url, original)):
+            ignore_existing = False
         if ignore_existing:
             body = body[:offset] + body[offset + len(raw):]  # drop the base the policy would reject
         else:
@@ -137,6 +150,27 @@ def _origin(url: str) -> str:
 def _rewrite_self(csp: str, origin: str) -> str:
     """Replace the 'self' source with a concrete origin."""
     return _SELF.sub(origin, csp)
+
+
+def _base_permitted(headers: dict, doc_url: str):
+    """Predicate(resolved_base_url) -> True if every base-uri directive in the response's CSP would
+    have allowed that base for a document at `doc_url`. Understands only `'self'` and `*`
+    (everything else, including 'none', is treated as not permitted, so the base is replaced)."""
+    doc_origin = _origin(doc_url)
+    allowed_sources = []
+    for key, value in headers.items():
+        if key.lower() != "content-security-policy":
+            continue
+        for policy in value.split(","):
+            for d in policy.split(";"):
+                parts = d.split()
+                if parts and parts[0].lower() == "base-uri":
+                    allowed_sources.append([x.lower() for x in parts[1:]])
+
+    def permitted(base_url: str) -> bool:
+        return all("*" in srcs or ("'self'" in srcs and _origin(base_url) == doc_origin)
+                   for srcs in allowed_sources)
+    return permitted
 
 
 def _rebase_headers(headers: dict, original_url: str, final_url: str):
@@ -322,7 +356,8 @@ class GuardedNavigator:
                 route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>blocked</title>")
             elif resp.url != req.url and _is_html(resp.headers):
                 headers, had_base_uri = _rebase_headers(resp.headers, req.url, resp.url)
-                body = _with_base(resp.body(), resp.url, ignore_existing=had_base_uri)
+                body = _with_base(resp.body(), resp.url, ignore_existing=had_base_uri,
+                                  keep_base=_base_permitted(resp.headers, req.url))
                 route.fulfill(status=resp.status, headers=headers, body=body)
             else:
                 route.fulfill(response=resp)

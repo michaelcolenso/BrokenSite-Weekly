@@ -882,6 +882,26 @@ def test_origin_is_canonical():
     assert _origin("http://h/") != _origin("https://h/")
 
 
+def test_with_base_preserves_unicode_in_a_parsed_base_href():
+    ref = _with_base(b'<base href="caf&eacute;/">', "http://h/sub/final")
+    raw = _with_base('<base href="café/">'.encode("utf-8"), "http://h/sub/final")
+    expected = '<base href="http://h/sub/café/">'.encode("utf-8")
+    assert ref == raw == expected
+
+
+def test_a_base_the_csp_permits_is_kept_but_a_forbidden_one_is_replaced():
+    from scanner.diagnostics.guard import _base_permitted
+    body = b'<base href="/assets/">'
+    selfonly = _base_permitted({"Content-Security-Policy": "base-uri 'self'"}, "http://a.test/f")
+    out = _with_base(body, "http://a.test/sub/g", ignore_existing=True, keep_base=selfonly)
+    assert out == b'<base href="http://a.test/assets/">'
+    none = _base_permitted({"Content-Security-Policy": "base-uri 'none'"}, "http://a.test/f")
+    out = _with_base(body, "http://a.test/sub/g", ignore_existing=True, keep_base=none)
+    assert b"/assets/" not in out and b'<base href="http://a.test/sub/g">' in out
+    cross = _base_permitted({"Content-Security-Policy": "base-uri 'self'"}, "http://a.test/f")
+    assert cross("http://evil.test/") is False
+
+
 def test_is_html_excludes_xhtml_and_other_types():
     from scanner.diagnostics.guard import _is_html
     assert _is_html({"content-type": "text/html; charset=utf-8"})
