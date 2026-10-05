@@ -17,7 +17,7 @@ import requests
 from scanner.crawl import PoliteCrawler
 from scanner.diagnostics import collector
 from scanner.diagnostics.guard import (
-    RobotsBlocked, _relax_base_uri, _rebase_headers, _rewrite_self, _with_base,
+    RobotsBlocked, _has_base_uri, _relax_base_uri, _rebase_headers, _rewrite_self, _with_base,
 )
 from scanner.screenshot import capture_homepage
 from scanner.diagnostics.collector import collect_diagnostics
@@ -772,3 +772,24 @@ def test_rebase_headers_same_origin_leaves_self_alone():
     out, had_base_uri = _rebase_headers({"Content-Security-Policy": "img-src 'self'"},
                                         "http://a.example/x", "http://a.example/y")
     assert out == {"Content-Security-Policy": "img-src 'self'"} and had_base_uri is False
+
+
+def test_base_uri_is_detected_by_directive_name_not_substring():
+    assert _has_base_uri("default-src 'self'; Base-URI 'none'")
+    assert _has_base_uri("img-src 'self', base-uri 'none'")
+    assert not _has_base_uri("img-src https://cdn.example/base-uri")
+    assert not _has_base_uri("img-src 'self'")
+    headers = {"Content-Security-Policy": "img-src https://cdn.example/base-uri"}
+    assert _rebase_headers(headers, "http://a/x", "http://a/y")[1] is False
+
+
+def test_synthetic_base_goes_after_the_doctype_even_behind_a_bom_or_comment():
+    tag = b'<base href="http://h/x">'
+    assert _with_base(b"<!-- c --><!DOCTYPE html><html>", "http://h/x") == b"<!-- c --><!DOCTYPE html>" + tag + b"<html>"
+    assert _with_base(b"\xef\xbb\xbf<!doctype html><html>", "http://h/x") == b"\xef\xbb\xbf<!doctype html>" + tag + b"<html>"
+    assert _with_base(b"\xef\xbb\xbf<html>", "http://h/x") == b"\xef\xbb\xbf" + tag + b"<html>"
+
+
+def test_with_base_ignores_a_base_inside_noscript():
+    out = _with_base(b'<head><noscript><base href="/old/"></noscript></head>', "http://h/sub/final")
+    assert b'<base href="http://h/sub/final">' in out and b'href="/old/"' in out

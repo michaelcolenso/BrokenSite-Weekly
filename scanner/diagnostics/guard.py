@@ -23,28 +23,32 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 
-_DOCTYPE = re.compile(rb"\s*<!doctype[^>]*>", re.I)
+# A doctype may follow a BOM and any whitespace/comments; a start tag placed before it would put the
+# document in quirks mode.
+_DOCTYPE = re.compile(rb"(?:\xef\xbb\xbf)?(?:\s|<!--.*?-->)*<!doctype[^>]*>", re.I | re.S)
+_BOM = b"\xef\xbb\xbf"
 _HREF_ATTR = re.compile(rb"(\bhref\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
 
 
 class _BaseFinder(HTMLParser):
-    """Finds the first *active* <base href>: not inside a comment, script/style, or <template>."""
+    """Finds the first *active* <base href>: not inside a comment, script/style, <template> or
+    <noscript>."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
-        self.template_depth = 0
+        self.inert_depth = 0  # inside <template> or <noscript> (inert with scripting enabled)
         self.found = None  # (line, column, raw tag text)
 
     def handle_starttag(self, tag, attrs):
-        if tag == "template":
-            self.template_depth += 1
-        elif tag == "base" and self.found is None and self.template_depth == 0:
+        if tag in ("template", "noscript"):
+            self.inert_depth += 1
+        elif tag == "base" and self.found is None and self.inert_depth == 0:
             if any(k == "href" and v is not None for k, v in attrs):
                 self.found = (*self.getpos(), self.get_starttag_text())
 
     def handle_endtag(self, tag):
-        if tag == "template" and self.template_depth:
-            self.template_depth -= 1
+        if tag in ("template", "noscript") and self.inert_depth:
+            self.inert_depth -= 1
 
 
 def _find_active_base(body: bytes):
@@ -90,8 +94,14 @@ def _with_base(body: bytes, url: str, ignore_existing: bool = False) -> bytes:
             return body[:offset] + new_raw + body[offset + len(raw):]
     tag = b'<base href="' + html.escape(url, quote=True).encode("utf-8") + b'">'
     d = _DOCTYPE.match(body)
-    at = d.end() if d else 0
+    at = d.end() if d else (len(_BOM) if body.startswith(_BOM) else 0)
     return body[:at] + tag + body[at:]
+
+
+def _has_base_uri(csp: str) -> bool:
+    """True if any policy in the header has a base-uri directive (by directive name)."""
+    return any(d.split(None, 1)[0].lower() == "base-uri"
+               for policy in csp.split(",") for d in policy.split(";") if d.strip())
 
 
 def _relax_base_uri(csp: str) -> str:
@@ -132,7 +142,7 @@ def _rebase_headers(headers: dict, original_url: str, final_url: str):
     cross_origin = _origin(original_url) != _origin(final_url)
     for key in [k for k in out if k.lower() == "content-security-policy"]:
         value = out[key]
-        had_base_uri = had_base_uri or "base-uri" in value.lower()
+        had_base_uri = had_base_uri or _has_base_uri(value)
         value = _relax_base_uri(value)
         if value and cross_origin:
             value = _rewrite_self(value, _origin(final_url))
