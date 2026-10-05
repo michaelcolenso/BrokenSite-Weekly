@@ -27,7 +27,6 @@ from urllib.parse import urljoin, urlparse
 # document in quirks mode.
 _DOCTYPE = re.compile(rb"(?:\xef\xbb\xbf)?(?:\s|<!--.*?-->|<\?xml[^>]*>)*<!doctype[^>]*>", re.I | re.S)
 _BOM = b"\xef\xbb\xbf"
-_HREF_ATTR = re.compile(rb"((?<=[\s\"'/])href\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
 
 
 class _BaseFinder(HTMLParser):
@@ -37,14 +36,15 @@ class _BaseFinder(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
         self.inert_depth = 0  # inside <template> or <noscript> (inert with scripting enabled)
-        self.found = None  # (line, column, raw tag text)
+        self.found = None  # (line, column, raw tag text, parsed href value)
 
     def handle_starttag(self, tag, attrs):
         if tag in ("template", "noscript"):
             self.inert_depth += 1
         elif tag == "base" and self.found is None and self.inert_depth == 0:
-            if any(k == "href" and v is not None for k, v in attrs):
-                self.found = (*self.getpos(), self.get_starttag_text())
+            href = next((v for k, v in attrs if k == "href" and v is not None), None)  # first wins
+            if href is not None:
+                self.found = (*self.getpos(), self.get_starttag_text(), href)
 
     def handle_endtag(self, tag):
         if tag in ("template", "noscript") and self.inert_depth:
@@ -52,7 +52,7 @@ class _BaseFinder(HTMLParser):
 
 
 def _find_active_base(body: bytes):
-    """Return (offset, raw tag bytes) of the document's active <base href>, or None.
+    """Return (offset, raw tag bytes, parsed href) of the document's active <base href>, or None.
     The body is parsed as latin-1 so every character is exactly one byte and offsets map back."""
     text = body.decode("latin-1")
     finder = _BaseFinder()
@@ -63,12 +63,12 @@ def _find_active_base(body: bytes):
         return None
     if finder.found is None:
         return None
-    line, col, raw = finder.found
+    line, col, raw, href = finder.found
     offset = sum(len(l) + 1 for l in text.split("\n")[: line - 1]) + col
     raw_bytes = raw.encode("latin-1")
     if body[offset: offset + len(raw_bytes)] != raw_bytes:
         return None
-    return offset, raw_bytes
+    return offset, raw_bytes, href.encode("latin-1", "replace").decode("utf-8", "replace")
 
 
 def _with_base(body: bytes, url: str, ignore_existing: bool = False) -> bytes:
@@ -79,19 +79,15 @@ def _with_base(body: bytes, url: str, ignore_existing: bool = False) -> bytes:
     <base href> is neutralised (its href removed) and ours is injected instead; used when the
     response's own policy restricts <base>, which it would natively enforce on the page's base."""
     hit = _find_active_base(body)
-    if hit and ignore_existing:
-        offset, raw = hit
-        m = _HREF_ATTR.search(raw)
-        if m:
-            body = body[:offset] + raw[:m.start()] + raw[m.end():] + body[offset + len(raw):]
-    elif hit:
-        offset, raw = hit
-        m = _HREF_ATTR.search(raw)
-        if m:
-            original = (m.group(2) or m.group(3) or m.group(4) or b"").decode("utf-8", "replace")
-            resolved = html.escape(urljoin(url, html.unescape(original)), quote=True).encode("utf-8")
-            new_raw = raw[:m.start()] + m.group(1) + b'"' + resolved + b'"' + raw[m.end():]
-            return body[:offset] + new_raw + body[offset + len(raw):]
+    if hit:
+        offset, raw, original = hit
+        if ignore_existing:
+            body = body[:offset] + body[offset + len(raw):]  # drop the base the policy would reject
+        else:
+            # The href comes from the HTML parser (never from raw tag text), and the tag is
+            # rebuilt around it; attributes other than href (e.g. target) are not preserved.
+            resolved = html.escape(urljoin(url, original), quote=True).encode("utf-8")
+            return body[:offset] + b'<base href="' + resolved + b'">' + body[offset + len(raw):]
     tag = b'<base href="' + html.escape(url, quote=True).encode("utf-8") + b'">'
     d = _DOCTYPE.match(body)
     at = d.end() if d else (len(_BOM) if body.startswith(_BOM) else 0)
@@ -126,8 +122,16 @@ _SELF = re.compile(r"'self'", re.I)
 
 
 def _origin(url: str) -> str:
+    """Canonical origin: lowercase scheme and host, default port dropped."""
     p = urlparse(url)
-    return f"{p.scheme}://{p.netloc}"
+    scheme = p.scheme.lower()
+    try:
+        port = p.port
+    except ValueError:
+        port = None
+    if port == {"http": 80, "https": 443}.get(scheme):
+        port = None
+    return f"{scheme}://{(p.hostname or '').lower()}" + (f":{port}" if port else "")
 
 
 def _rewrite_self(csp: str, origin: str) -> str:

@@ -775,7 +775,7 @@ def test_a_base_the_response_forbids_is_replaced_not_activated(server, tmp_path)
 
 def test_with_base_ignore_existing_neutralises_the_pages_base_and_injects_ours():
     out = _with_base(b'<head><base href="/evil/" target="_blank"></head>', "http://h/sub/final", ignore_existing=True)
-    assert b"/evil/" not in out and b'target="_blank"' in out
+    assert b"/evil/" not in out
     assert b'<base href="http://h/sub/final">' in out
 
 
@@ -823,7 +823,7 @@ def test_synthetic_base_goes_after_an_xml_declaration_and_doctype():
 
 def test_with_base_only_matches_the_real_href_attribute():
     out = _with_base(b'<base data-href="/tracking" href="a/">', "http://h/sub/final")
-    assert b'data-href="/tracking"' in out and b'href="http://h/sub/a/"' in out
+    assert out == b'<base href="http://h/sub/a/">'
 
 
 class _FakeResp:
@@ -867,6 +867,19 @@ def test_a_same_origin_redirected_iframe_is_still_rebased():
     route = _FakeRoute("http://a.test/f", _FakeResp("http://a.test/sub/g"))
     nav._pass_through(route)
     assert nav.iframe_blocked == [] and b"<base" in route.fulfilled["body"]
+
+
+def test_with_base_ignores_href_text_inside_another_attribute_value():
+    out = _with_base(b'<base data-info="href=/tracking" href="a/">', "http://h/sub/final")
+    assert out == b'<base href="http://h/sub/a/">'
+
+
+def test_origin_is_canonical():
+    from scanner.diagnostics.guard import _origin
+    assert _origin("https://Example.com/a") == _origin("https://example.com:443/b")
+    assert _origin("http://h:80/") == _origin("http://h/")
+    assert _origin("http://h:8080/") != _origin("http://h/")
+    assert _origin("http://h/") != _origin("https://h/")
 
 
 def test_is_html_excludes_xhtml_and_other_types():
