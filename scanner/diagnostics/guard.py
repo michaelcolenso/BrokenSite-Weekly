@@ -20,13 +20,14 @@ from __future__ import annotations
 import html
 import re
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 
 # A doctype may follow a BOM and any whitespace/comments; a start tag placed before it would put the
 # document in quirks mode.
 _DOCTYPE = re.compile(rb"(?:\xef\xbb\xbf)?(?:\s|<!--.*?-->|<\?xml[^>]*>)*<!doctype[^>]*>", re.I | re.S)
 _BOM = b"\xef\xbb\xbf"
+_URL_SAFE = "%:/?#[]@!$&'()*+,;=~-._"
 
 
 class _BaseFinder(HTMLParser):
@@ -99,7 +100,9 @@ def _with_base(body: bytes, url: str, ignore_existing: bool = False, keep_base=N
         else:
             # The href comes from the HTML parser (never from raw tag text), and the tag is
             # rebuilt around it; attributes other than href (e.g. target) are not preserved.
-            resolved = html.escape(urljoin(url, original), quote=True).encode("utf-8")
+            # ASCII only (non-ASCII percent-encoded as UTF-8), so the rebuilt tag reads the same
+            # whatever charset the response declares.
+            resolved = html.escape(quote(urljoin(url, original), safe=_URL_SAFE), quote=True).encode("ascii")
             return body[:offset] + b'<base href="' + resolved + b'">' + body[offset + len(raw):]
     tag = b'<base href="' + html.escape(url, quote=True).encode("utf-8") + b'">'
     d = _DOCTYPE.match(body)

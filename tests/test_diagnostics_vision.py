@@ -885,7 +885,7 @@ def test_origin_is_canonical():
 def test_with_base_preserves_unicode_in_a_parsed_base_href():
     ref = _with_base(b'<base href="caf&eacute;/">', "http://h/sub/final")
     raw = _with_base('<base href="café/">'.encode("utf-8"), "http://h/sub/final")
-    expected = '<base href="http://h/sub/café/">'.encode("utf-8")
+    expected = b'<base href="http://h/sub/caf%C3%A9/">'  # ASCII only: safe under any declared charset
     assert ref == raw == expected
 
 
