@@ -48,7 +48,7 @@ def capture_homepage(url: str, output_path: str | Path, *, crawler: PoliteCrawle
                 raise RobotsBlocked(nav.blocked[0])
             page.screenshot(path=str(output_path), type="jpeg", quality=70, full_page=False)
             if nav.post_hits:  # a timer submitted a form while the screenshot was being taken
-                output_path.unlink(missing_ok=True)
+                Path(output_path).unlink(missing_ok=True)
                 raise FormPostBlocked(nav.post_hits[0])
         finally:
             browser.close()

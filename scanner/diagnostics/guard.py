@@ -190,6 +190,7 @@ class GuardedNavigator:
         self.frozen = False
         self.frozen_hits: list[str] = []      # navigations attempted after freeze() (vetoed)
         self.popup_hits: list[str] = []       # navigations of other pages (popups) (vetoed)
+        self.iframe_blocked: list[str] = []   # cross-origin iframe redirects refused (blank frame)
         self.iframe_post_hits: list[str] = []  # non-GET iframe navigations (vetoed, capture continues)
         self.post_hits: list[str] = []        # top-level non-GET navigations (form posts) (vetoed)
         context.route("**/*", self._on_route)
@@ -310,7 +311,12 @@ class GuardedNavigator:
         req = route.request
         try:
             resp = route.fetch(max_redirects=self.max_redirects)
-            if resp.url != req.url and _is_html(resp.headers):
+            if resp.url != req.url and _origin(resp.url) != _origin(req.url):
+                # Fulfilling B's document under A's URL would run B's scripts as origin A (reading
+                # A's storage, reaching an unsandboxed same-origin parent). Refuse: blank frame.
+                self.iframe_blocked.append(resp.url)
+                route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>blocked</title>")
+            elif resp.url != req.url and _is_html(resp.headers):
                 headers, had_base_uri = _rebase_headers(resp.headers, req.url, resp.url)
                 body = _with_base(resp.body(), resp.url, ignore_existing=had_base_uri)
                 route.fulfill(status=resp.status, headers=headers, body=body)

@@ -17,7 +17,7 @@ import requests
 from scanner.crawl import PoliteCrawler
 from scanner.diagnostics import collector
 from scanner.diagnostics.guard import (
-    RobotsBlocked, _has_base_uri, _relax_base_uri, _rebase_headers, _rewrite_self, _with_base,
+    GuardedNavigator, RobotsBlocked, _has_base_uri, _relax_base_uri, _rebase_headers, _rewrite_self, _with_base,
 )
 from scanner.screenshot import capture_homepage
 from scanner.diagnostics.collector import collect_diagnostics
@@ -824,6 +824,49 @@ def test_synthetic_base_goes_after_an_xml_declaration_and_doctype():
 def test_with_base_only_matches_the_real_href_attribute():
     out = _with_base(b'<base data-href="/tracking" href="a/">', "http://h/sub/final")
     assert b'data-href="/tracking"' in out and b'href="http://h/sub/a/"' in out
+
+
+class _FakeResp:
+    def __init__(self, url, body=b"<html>x</html>"):
+        self.url, self.status, self.headers = url, 200, {"content-type": "text/html"}
+        self._body = body
+
+    def body(self):
+        return self._body
+
+
+class _FakeRoute:
+    def __init__(self, req_url, resp):
+        self.request = type("R", (), {"url": req_url})()
+        self._resp, self.fulfilled = resp, None
+
+    def fetch(self, **kw):
+        return self._resp
+
+    def fulfill(self, **kw):
+        self.fulfilled = kw
+
+    def abort(self, *a):
+        raise AssertionError("aborted")
+
+
+def _navigator():
+    return GuardedNavigator(type("C", (), {"route": lambda *a: None, "on": lambda *a: None})(), None, allow_fn=None, max_redirects=3)
+
+
+def test_a_cross_origin_redirected_iframe_is_not_fulfilled_under_the_original_origin():
+    nav = _navigator()
+    route = _FakeRoute("http://a.test/f", _FakeResp("http://b.test/f", b"<script>steal()</script>"))
+    nav._pass_through(route)
+    assert nav.iframe_blocked == ["http://b.test/f"]
+    assert b"steal" not in route.fulfilled["body"].encode()
+
+
+def test_a_same_origin_redirected_iframe_is_still_rebased():
+    nav = _navigator()
+    route = _FakeRoute("http://a.test/f", _FakeResp("http://a.test/sub/g"))
+    nav._pass_through(route)
+    assert nav.iframe_blocked == [] and b"<base" in route.fulfilled["body"]
 
 
 def test_is_html_excludes_xhtml_and_other_types():
