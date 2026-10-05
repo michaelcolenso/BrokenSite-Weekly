@@ -90,6 +90,11 @@ class Handler(BaseHTTPRequestHandler):
             body = (b"<html><body><h1>interstitial</h1><form method=post action='/postsink'>"
                     b"<input name=a value=1></form><script>document.forms[0].submit()</script></body></html>")
             code = 200
+        elif path == "/iframepost":  # form that targets a hidden iframe
+            body = (b"<html><body><h1>real page</h1><iframe name=f></iframe>"
+                    b"<form method=post action='/postsink' target=f><input name=a value=1></form>"
+                    b"<script>document.forms[0].submit()</script></body></html>")
+            code = 200
         elif path == "/latepost":  # submits a form well after the settle window
             body = (b"<html><body><h1>real page</h1><form method=post action='/postsink'>"
                     b"<input name=a value=1></form><script>setTimeout(function(){document.forms[0].submit()},650)"
@@ -720,6 +725,13 @@ def test_a_form_submitted_after_the_settle_window_is_still_reported_as_a_post(se
     Handler.post_hits.clear()
     r = collect(f"http://{server}/latepost", tmp_path)
     assert r.status == "blocked" and "form_post_blocked" in r.error
+    assert Handler.post_hits == []
+
+
+def test_a_form_posted_into_an_iframe_is_not_sent_and_does_not_void_the_capture(server, tmp_path):
+    Handler.post_hits.clear()
+    r = collect(f"http://{server}/iframepost", tmp_path)
+    assert r.status == "ok" and r.screenshot_path
     assert Handler.post_hits == []
 
 

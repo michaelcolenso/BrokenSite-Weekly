@@ -185,6 +185,7 @@ class GuardedNavigator:
         self.frozen = False
         self.frozen_hits: list[str] = []      # navigations attempted after freeze() (vetoed)
         self.popup_hits: list[str] = []       # navigations of other pages (popups) (vetoed)
+        self.iframe_post_hits: list[str] = []  # non-GET iframe navigations (vetoed, capture continues)
         self.post_hits: list[str] = []        # top-level non-GET navigations (form posts) (vetoed)
         context.route("**/*", self._on_route)
         # The captured page is the only page that may navigate: close anything it opens (popups).
@@ -248,6 +249,12 @@ class GuardedNavigator:
             return
         # Child-frame (iframe) documents are navigations too, but the screenshot exception in
         # HANDOFF rule 4 treats them as embedded content, so only the main frame is guarded.
+        if is_nav and not main_frame_nav and req.method != "GET":
+            # Same "never submit a form" policy as the top level, but a hidden-iframe post (ad or
+            # analytics frame) shouldn't void the whole capture: the frame gets a blank document.
+            self.iframe_post_hits.append(req.url)
+            route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>blocked</title>")
+            return
         if self.allow_fn and is_nav and not main_frame_nav:
             self._pass_through(route)
             return
