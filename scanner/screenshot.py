@@ -23,7 +23,7 @@ def capture_homepage(url: str, output_path: str | Path, *, crawler: PoliteCrawle
     """
     from playwright.sync_api import sync_playwright
 
-    from scanner.diagnostics.guard import GuardedNavigator, RobotsBlocked
+    from scanner.diagnostics.guard import FormPostBlocked, GuardedNavigator, RobotsBlocked
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -47,5 +47,8 @@ def capture_homepage(url: str, output_path: str | Path, *, crawler: PoliteCrawle
             if nav.blocked:
                 raise RobotsBlocked(nav.blocked[0])
             page.screenshot(path=str(output_path), type="jpeg", quality=70, full_page=False)
+            if nav.post_hits:  # a timer submitted a form while the screenshot was being taken
+                output_path.unlink(missing_ok=True)
+                raise FormPostBlocked(nav.post_hits[0])
         finally:
             browser.close()

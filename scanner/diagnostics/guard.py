@@ -27,7 +27,7 @@ from urllib.parse import urljoin, urlparse
 # document in quirks mode.
 _DOCTYPE = re.compile(rb"(?:\xef\xbb\xbf)?(?:\s|<!--.*?-->|<\?xml[^>]*>)*<!doctype[^>]*>", re.I | re.S)
 _BOM = b"\xef\xbb\xbf"
-_HREF_ATTR = re.compile(rb"(\bhref\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
+_HREF_ATTR = re.compile(rb"((?<=[\s\"'/])href\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
 
 
 class _BaseFinder(HTMLParser):
@@ -96,6 +96,11 @@ def _with_base(body: bytes, url: str, ignore_existing: bool = False) -> bytes:
     d = _DOCTYPE.match(body)
     at = d.end() if d else (len(_BOM) if body.startswith(_BOM) else 0)
     return body[:at] + tag + body[at:]
+
+
+def _is_html(headers: dict) -> bool:
+    """text/html only: an HTML <base> would break an XHTML (XML) document."""
+    return headers.get("content-type", "").lower().split(";")[0].strip() == "text/html"
 
 
 def _has_base_uri(csp: str) -> bool:
@@ -305,7 +310,7 @@ class GuardedNavigator:
         req = route.request
         try:
             resp = route.fetch(max_redirects=self.max_redirects)
-            if resp.url != req.url and "html" in resp.headers.get("content-type", "").lower():
+            if resp.url != req.url and _is_html(resp.headers):
                 headers, had_base_uri = _rebase_headers(resp.headers, req.url, resp.url)
                 body = _with_base(resp.body(), resp.url, ignore_existing=had_base_uri)
                 route.fulfill(status=resp.status, headers=headers, body=body)

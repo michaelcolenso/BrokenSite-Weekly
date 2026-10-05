@@ -821,6 +821,18 @@ def test_synthetic_base_goes_after_an_xml_declaration_and_doctype():
     assert out == body.replace(b"<html>", tag + b"<html>")
 
 
+def test_with_base_only_matches_the_real_href_attribute():
+    out = _with_base(b'<base data-href="/tracking" href="a/">', "http://h/sub/final")
+    assert b'data-href="/tracking"' in out and b'href="http://h/sub/a/"' in out
+
+
+def test_is_html_excludes_xhtml_and_other_types():
+    from scanner.diagnostics.guard import _is_html
+    assert _is_html({"content-type": "text/html; charset=utf-8"})
+    assert not _is_html({"content-type": "application/xhtml+xml"})
+    assert not _is_html({})
+
+
 def test_with_base_ignores_a_base_inside_noscript():
     out = _with_base(b'<head><noscript><base href="/old/"></noscript></head>', "http://h/sub/final")
     assert b'<base href="http://h/sub/final">' in out and b'href="/old/"' in out
