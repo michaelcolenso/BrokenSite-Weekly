@@ -208,6 +208,8 @@ def browse(url: str, out_dir: Path, stem: str, allow_fn=None, wait_fn=None, reco
                 result.blocked_navigation_url = nav.frozen_hits[0]
             if nav.blocked:
                 raise RobotsBlocked(nav.blocked[0])
+            if nav.post_hits:
+                raise FormPostBlocked(nav.post_hits[0])
             if page.url.split("#")[0] != doc["url"].split("#")[0]:
                 raise RuntimeError("document_changed_during_capture")
         finally:

@@ -90,6 +90,11 @@ class Handler(BaseHTTPRequestHandler):
             body = (b"<html><body><h1>interstitial</h1><form method=post action='/postsink'>"
                     b"<input name=a value=1></form><script>document.forms[0].submit()</script></body></html>")
             code = 200
+        elif path == "/latepost":  # submits a form well after the settle window
+            body = (b"<html><body><h1>real page</h1><form method=post action='/postsink'>"
+                    b"<input name=a value=1></form><script>setTimeout(function(){document.forms[0].submit()},650)"
+                    b"</script></body></html>")
+            code = 200
         elif path == "/popuppage":  # opens a popup whose initial document redirects
             body = b"<html><body><h1>home</h1><script>window.open('/popupredir')</script></body></html>"
             code = 200
@@ -711,6 +716,13 @@ def test_a_page_that_auto_submits_a_form_does_not_get_its_post_sent(server, tmp_
     assert r.screenshot_path is None  # and the stub page was never captured as if it were the site
 
 
+def test_a_form_submitted_after_the_settle_window_is_still_reported_as_a_post(server, tmp_path):
+    Handler.post_hits.clear()
+    r = collect(f"http://{server}/latepost", tmp_path)
+    assert r.status == "blocked" and "form_post_blocked" in r.error
+    assert Handler.post_hits == []
+
+
 def test_capture_homepage_refuses_a_page_that_auto_submits_a_form(server, tmp_path):
     from scanner.diagnostics.guard import FormPostBlocked
     Handler.post_hits.clear()
@@ -788,6 +800,13 @@ def test_synthetic_base_goes_after_the_doctype_even_behind_a_bom_or_comment():
     assert _with_base(b"<!-- c --><!DOCTYPE html><html>", "http://h/x") == b"<!-- c --><!DOCTYPE html>" + tag + b"<html>"
     assert _with_base(b"\xef\xbb\xbf<!doctype html><html>", "http://h/x") == b"\xef\xbb\xbf<!doctype html>" + tag + b"<html>"
     assert _with_base(b"\xef\xbb\xbf<html>", "http://h/x") == b"\xef\xbb\xbf" + tag + b"<html>"
+
+
+def test_synthetic_base_goes_after_an_xml_declaration_and_doctype():
+    tag = b'<base href="http://h/x">'
+    body = b'<?xml version="1.0"?>\n<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0//EN" "x"><html>'
+    out = _with_base(body, "http://h/x")
+    assert out == body.replace(b"<html>", tag + b"<html>")
 
 
 def test_with_base_ignores_a_base_inside_noscript():

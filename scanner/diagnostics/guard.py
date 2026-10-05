@@ -25,7 +25,7 @@ from urllib.parse import urljoin, urlparse
 
 # A doctype may follow a BOM and any whitespace/comments; a start tag placed before it would put the
 # document in quirks mode.
-_DOCTYPE = re.compile(rb"(?:\xef\xbb\xbf)?(?:\s|<!--.*?-->)*<!doctype[^>]*>", re.I | re.S)
+_DOCTYPE = re.compile(rb"(?:\xef\xbb\xbf)?(?:\s|<!--.*?-->|<\?xml[^>]*>)*<!doctype[^>]*>", re.I | re.S)
 _BOM = b"\xef\xbb\xbf"
 _HREF_ATTR = re.compile(rb"(\bhref\s*=\s*)(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))", re.I)
 
@@ -229,7 +229,12 @@ class GuardedNavigator:
         if self.frozen and main_frame_nav:
             # After the settle window every capture must describe one document. ERR_ABORTED keeps
             # the current document; the default error code would commit an error page.
-            self.frozen_hits.append(req.url)
+            # A late auto-submitted form is recorded as a POST so the collector reports
+            # form_post_blocked instead of a screenshot of the pre-submit document.
+            if req.method != "GET":
+                self.post_hits.append(req.url)
+            else:
+                self.frozen_hits.append(req.url)
             route.abort("aborted")
             return
         if main_frame_nav and req.method != "GET":
