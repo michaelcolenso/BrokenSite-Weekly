@@ -184,7 +184,7 @@ def scan_business(
 
     screenshot_key = None
     if screenshots_dir is not None and tier in ("A", "B") and html:
-        screenshot_key = _try_screenshot(base_url, domain, screenshots_dir)
+        screenshot_key = _try_screenshot(base_url, domain, screenshots_dir, crawler)
 
     return LeadRecord(
         domain=domain,
@@ -198,14 +198,14 @@ def scan_business(
     )
 
 
-def _try_screenshot(url: str, domain: str, screenshots_dir: Path) -> str | None:
+def _try_screenshot(url: str, domain: str, screenshots_dir: Path, crawler: PoliteCrawler) -> str | None:
     """Capture a homepage screenshot; failures are logged and non-fatal."""
     safe_name = domain.replace("/", "_")
     path = screenshots_dir / f"{safe_name}.jpg"
     try:
         from scanner.screenshot import capture_homepage
 
-        capture_homepage(url, path)
+        capture_homepage(url, path, crawler=crawler)
         return str(path)
     except Exception as exc:  # noqa: BLE001 - screenshot is best-effort
         logger.warning("screenshot failed for %s: %s", domain, exc)
