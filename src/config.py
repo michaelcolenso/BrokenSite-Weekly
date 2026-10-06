@@ -217,6 +217,8 @@ class GumroadConfig:
     # Multi-product support (JSON mapping)
     products_json: str = field(default_factory=lambda: os.environ.get("GUMROAD_PRODUCTS_JSON", ""))
     pro_seat_cap: int = field(default_factory=lambda: int(os.environ.get("GUMROAD_PRO_SEAT_CAP", "5")))
+    # Per-metro seat cap for the exclusive tier (earliest created_at wins).
+    exclusive_seat_cap: int = field(default_factory=lambda: int(os.environ.get("GUMROAD_EXCLUSIVE_SEAT_CAP", "3")))
     api_base_url: str = "https://api.gumroad.com/v2"
 
 
