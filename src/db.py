@@ -596,6 +596,14 @@ class Database:
             """, (run_id, subscriber_email, lead_count, csv_path, datetime.utcnow(), tier, export_type))
 
 
+    def get_distinct_cities(self) -> List[str]:
+        """Return distinct lead cities (canonical city strings seen in scraping)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT city FROM leads WHERE city IS NOT NULL AND city != '' ORDER BY city"
+            ).fetchall()
+            return [row[0] for row in rows]
+
     def get_top_yield_city_categories(
         self,
         *,
