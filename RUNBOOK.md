@@ -86,6 +86,65 @@ exports (
 )
 ```
 
+## Subscriber Metros (Per-Metro Delivery)
+
+Each subscriber picks **one metro** and receives only that metro's weekly CSV.
+The metro lives in `data/subscriber_prefs.json` (keyed by lowercased email),
+managed with `scripts/set_subscriber_metro.py`.
+
+**Canonical metro format: `"City, ST"`** — e.g. `"Austin, TX"`, `"Denver, CO"`.
+The CLI validates against the union of `TARGET_CITIES_JSON` and the distinct
+cities already in the leads database, and normalizes casing to the canonical
+form. Unknown metros produce a **warning, not an error** — a new metro is
+legitimate and becomes a new scrape target on the next run.
+
+### Operator workflow (new buyer)
+
+1. Buyer purchases → email them asking which metro they want leads for
+   (do this in the purchase-confirmation email so unmapped buyers don't pile up).
+2. Record the answer:
+   ```bash
+   venv/bin/python scripts/set_subscriber_metro.py set buyer@email.com "Austin, TX"
+   ```
+   (`list` shows all email → metro mappings; `remove <email>` unmaps them.)
+3. Next Sunday run automatically adds the metro to the scrape set and delivers.
+   No deploy, no config edit. Metros with zero active subscribers are never
+   scraped; if *no* subscriber has a metro mapped, the scrape set falls back
+   to `TARGET_CITIES_JSON` (bootstrap mode).
+4. Cancellation → Gumroad status flips → the subscriber drops out
+   automatically; the metro leaves the scrape set when its last subscriber goes.
+
+### Delivery rules
+
+- **One CSV per (tier, metro)** with the metro in the subject and filename,
+  e.g. subject `Your Weekly Broken Website Leads — Austin, TX (42 leads)`,
+  file `broken_site_leads_2026-10-06_pro_austin-tx.csv`.
+- **Unmapped subscribers are held** — no email, no guessing, no all-cities
+  CSV. They are listed under **ACTION NEEDED** in the weekly summary until
+  mapped (step 2 above).
+- **Zero-lead "quiet week"**: if a metro has no qualifying leads that week,
+  its subscribers get a short email (no attachment): "No new broken sites in
+  {metro} this week." Keeps the Sunday habit honest.
+- If the prefs file is missing or corrupt, the store fails open to empty →
+  everyone is unmapped → held + flagged. Safe direction. The file is backed
+  up by `scripts/backup_db.sh`.
+
+### Exclusive tier ($99/mo, 3 seats per metro)
+
+- Map the exclusive product in `GUMROAD_PRODUCTS_JSON`, e.g.
+  `{"basic":"id1","pro":"id2","exclusive":"id3"}`.
+- **Rank**: a buyer holding multiple products keeps the highest tier
+  (exclusive > pro > basic).
+- **Lead pool**: exclusive subscribers are served from the pro lead pool.
+- **Per-metro seat cap**: at most 3 exclusive subscribers per metro
+  (override with `GUMROAD_EXCLUSIVE_SEAT_CAP`). Earliest Gumroad `created_at`
+  wins; subscribers over the cap are **held and flagged** in the weekly
+  summary — refund or reassign them. They are never silently dropped.
+- **Claimed metros**: a metro with ≥1 exclusive subscriber is claimed. Basic
+  and pro subscribers mapped to a claimed metro are held and flagged
+  ("contact subscriber to upgrade or pick another metro") — only exclusive
+  subscribers ever receive that metro's leads.
+
 ## Common Operations
 
 ### Check System Status
