@@ -18,6 +18,10 @@ from .logging_setup import get_logger
 
 logger = get_logger("gumroad")
 
+# Tier privilege ranking: higher wins when deduping by email; lower is the
+# safer fallback when a subscriber's variant is missing or unrecognized.
+_TIER_RANK = {"exclusive": 3, "pro": 2, "basic": 1, "standard": 1}
+
 
 @dataclass
 class Subscriber:
@@ -226,16 +230,25 @@ def _tier_from_variant(variants: Any, fallback: str) -> str:
     return fallback
 
 
+def _safest_fallback_tier(tiers: List[str]) -> str:
+    """Pick the lowest-privilege tier among those mapped to one product id.
+
+    Used as the variant fallback so a missing/unrecognized variant can never
+    inherit a higher tier just because it appeared first in the mapping.
+    Unknown tier names rank 0 (least privilege).
+    """
+    return min(tiers, key=lambda t: _TIER_RANK.get(t, 0))
+
+
 def _dedupe_by_email(subscribers: List[Subscriber]) -> List[Subscriber]:
     """Deduplicate by email, keeping highest tier (exclusive > pro > basic/standard)."""
-    rank = {"exclusive": 3, "pro": 2, "basic": 1, "standard": 1}
     by_email: Dict[str, Subscriber] = {}
     for sub in subscribers:
         existing = by_email.get(sub.email)
         if not existing:
             by_email[sub.email] = sub
             continue
-        if rank.get(sub.tier, 0) > rank.get(existing.tier, 0):
+        if _TIER_RANK.get(sub.tier, 0) > _TIER_RANK.get(existing.tier, 0):
             by_email[sub.email] = sub
     return list(by_email.values())
 
@@ -331,15 +344,20 @@ def get_subscribers_with_isolation(
 
         # Tiered memberships map several tiers to the SAME product id —
         # fetch each product once; per-record variant tiers handle the rest.
-        seen_product_ids = set()
-        all_subscribers: List[Subscriber] = []
+        tiers_by_product: Dict[str, List[str]] = {}
         for product in products:
             tier = str(product.get("tier", "basic")).lower()
             product_id = product.get("id")
-            if not product_id or product_id in seen_product_ids:
-                continue
-            seen_product_ids.add(product_id)
-            subs = client.get_active_subscribers(product_id, tier)
+            if product_id:
+                tiers_by_product.setdefault(product_id, []).append(tier)
+
+        all_subscribers: List[Subscriber] = []
+        for product_id, tiers in tiers_by_product.items():
+            # Least-privilege fallback, independent of mapping order, so an
+            # untagged subscriber can't inherit the highest mapped tier.
+            subs = client.get_active_subscribers(
+                product_id, _safest_fallback_tier(tiers)
+            )
             all_subscribers.extend(subs)
 
         # Enforce Pro seat cap
