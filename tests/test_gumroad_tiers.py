@@ -11,6 +11,7 @@ from src.config import GumroadConfig, RetryConfig
 from src.gumroad import (
     GumroadClient,
     _dedupe_by_email,
+    _safest_fallback_tier,
     _tier_from_variant,
     get_subscribers_with_isolation,
 )
@@ -191,3 +192,67 @@ class TestTieredMembershipEndToEnd:
         # Standard subscribers are NOT held by the exclusive seat cap.
         assert held == []
         assert len(subs) == 5
+
+
+# ── Fallback tier: least-privilege, mapping-order independent ────────────────
+
+class TestSafestFallbackTier:
+    def test_lowest_rank_wins_regardless_of_order(self):
+        assert _safest_fallback_tier(["exclusive", "standard"]) == "standard"
+        assert _safest_fallback_tier(["standard", "exclusive"]) == "standard"
+        assert _safest_fallback_tier(["pro", "basic"]) == "basic"
+
+    def test_unknown_tier_is_least_privilege(self):
+        assert _safest_fallback_tier(["exclusive", "platinum"]) == "platinum"
+
+
+class TestFallbackMappingOrderIndependence:
+    """P2 fix: with several tiers on one product id, a variant-less
+    subscriber must fall back to the lowest-rank tier no matter how the
+    mapping is ordered."""
+
+    BOTH_ORDERS = [
+        {"exclusive": TIERED_PRODUCT_ID, "standard": TIERED_PRODUCT_ID},
+        {"standard": TIERED_PRODUCT_ID, "exclusive": TIERED_PRODUCT_ID},
+    ]
+
+    def _tiers(self, monkeypatch, retry_config, prefs_store, products, raw_subs):
+        api = _FakeGumroadAPI(raw_subs)
+        monkeypatch.setattr(GumroadClient, "_request", api)
+        subs, err = get_subscribers_with_isolation(
+            _config(products), retry_config, prefs_store=prefs_store
+        )
+        assert err is None
+        return {s.email: s.tier for s in subs}
+
+    def test_variantless_subscriber_falls_back_to_standard(
+        self, monkeypatch, retry_config, prefs_store
+    ):
+        for products in self.BOTH_ORDERS:
+            tiers = self._tiers(
+                monkeypatch, retry_config, prefs_store,
+                products, [_raw_sub("legacy@x.com")],
+            )
+            assert tiers["legacy@x.com"] == "standard"
+
+    def test_exclusive_variant_still_exclusive(
+        self, monkeypatch, retry_config, prefs_store
+    ):
+        for products in self.BOTH_ORDERS:
+            tiers = self._tiers(
+                monkeypatch, retry_config, prefs_store,
+                products, [_raw_sub("vip@x.com", {"Tier": "Metro Exclusive"})],
+            )
+            assert tiers["vip@x.com"] == "exclusive"
+
+    def test_unknown_tier_name_is_least_privilege(
+        self, monkeypatch, retry_config, prefs_store
+    ):
+        # 'platinum' is unranked (rank 0), so it beats 'exclusive' as the
+        # fallback for a variant-less subscriber.
+        tiers = self._tiers(
+            monkeypatch, retry_config, prefs_store,
+            {"exclusive": TIERED_PRODUCT_ID, "platinum": TIERED_PRODUCT_ID},
+            [_raw_sub("legacy@x.com")],
+        )
+        assert tiers["legacy@x.com"] == "platinum"
