@@ -4,6 +4,7 @@ Sends weekly CSV attachments to subscribers via SMTP.
 """
 
 import csv
+import re
 import smtplib
 import ssl
 from io import StringIO
@@ -166,6 +167,11 @@ def _build_portal_url(subscriber: Subscriber, portal_config: Optional[PortalConf
     return f"{base_url}/portal?token={token}"
 
 
+def _metro_slug(metro: str) -> str:
+    """Filesystem-safe slug for a metro name ('Austin, TX' -> 'austin-tx')."""
+    return re.sub(r"[^a-z0-9]+", "-", metro.lower()).strip("-")
+
+
 def create_email(
     subscriber: Subscriber,
     csv_content: str,
@@ -173,12 +179,16 @@ def create_email(
     lead_count: int,
     config: SMTPConfig,
     portal_url: Optional[str] = None,
+    metro: Optional[str] = None,
 ) -> MIMEMultipart:
     """Create email message with CSV attachment."""
     msg = MIMEMultipart()
     msg["From"] = f"{config.from_name} <{config.from_email}>"
     msg["To"] = subscriber.email
-    msg["Subject"] = f"Your Weekly Broken Website Leads ({lead_count} leads)"
+    if metro:
+        msg["Subject"] = f"Your Weekly Broken Website Leads — {metro} ({lead_count} leads)"
+    else:
+        msg["Subject"] = f"Your Weekly Broken Website Leads ({lead_count} leads)"
 
     # Email body
     greeting = f"Hi{' ' + subscriber.full_name.split()[0] if subscriber.full_name else ''},"
@@ -252,6 +262,68 @@ def send_email(
         do_send()
 
 
+def create_quiet_week_email(
+    subscriber: Subscriber,
+    metro: str,
+    config: SMTPConfig,
+    portal_url: Optional[str] = None,
+) -> MIMEMultipart:
+    """Create the zero-lead 'quiet week' email (no attachment)."""
+    msg = MIMEMultipart()
+    msg["From"] = f"{config.from_name} <{config.from_email}>"
+    msg["To"] = subscriber.email
+    msg["Subject"] = f"No new broken sites in {metro} this week"
+
+    greeting = f"Hi{' ' + subscriber.full_name.split()[0] if subscriber.full_name else ''},"
+    portal_block = f"\nPortal access:\n{portal_url}\n" if portal_url else ""
+    body = f"""{greeting}
+
+No new broken sites in {metro} this week.
+
+We scraped and checked {metro} as usual, but nothing new crossed the
+broken-site score threshold. That's normal some weeks — we'll be back
+in your inbox next Sunday.
+{portal_block}
+---
+BrokenSite Weekly
+Unsubscribe anytime from your Gumroad account.
+"""
+    msg.attach(MIMEText(body, "plain"))
+    return msg
+
+
+def send_quiet_week_emails(
+    subscribers: List[Subscriber],
+    metro: str,
+    config: SMTPConfig,
+    retry_config: RetryConfig = None,
+    portal_config: PortalConfig = None,
+) -> List[DeliveryResult]:
+    """Send the zero-lead 'quiet week' email (no CSV) to a metro's subscribers.
+
+    Each subscriber send is isolated - one failure doesn't affect others.
+    """
+    results: List[DeliveryResult] = []
+    for subscriber in subscribers:
+        try:
+            portal_url = _build_portal_url(subscriber, portal_config)
+            msg = create_quiet_week_email(
+                subscriber=subscriber,
+                metro=metro,
+                config=config,
+                portal_url=portal_url,
+            )
+            send_email(msg, config, retry_config)
+            logger.info(f"Quiet-week email sent to: {subscriber.email} ({metro})")
+            results.append(DeliveryResult(subscriber_email=subscriber.email, success=True))
+        except Exception as e:
+            logger.error(f"Failed quiet-week email to {subscriber.email}: {e}")
+            results.append(DeliveryResult(
+                subscriber_email=subscriber.email, success=False, error=str(e)
+            ))
+    return results
+
+
 def deliver_to_subscribers(
     subscribers: List[Subscriber],
     leads: List[Dict[str, Any]],
@@ -259,6 +331,7 @@ def deliver_to_subscribers(
     retry_config: RetryConfig = None,
     portal_config: PortalConfig = None,
     csv_label: str = None,
+    metro: Optional[str] = None,
 ) -> List[DeliveryResult]:
     """
     Deliver CSV to all subscribers.
@@ -279,6 +352,8 @@ def deliver_to_subscribers(
     # Generate CSV once
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     label = f"_{csv_label}" if csv_label else ""
+    if metro and _metro_slug(metro) not in (csv_label or ""):
+        label = f"{label}_{_metro_slug(metro)}"
     csv_filename = f"broken_site_leads_{date_str}{label}.csv"
     csv_content, csv_path = generate_csv(leads, output_path=OUTPUT_DIR / csv_filename)
 
@@ -294,6 +369,7 @@ def deliver_to_subscribers(
                 lead_count=len(leads),
                 config=config,
                 portal_url=portal_url,
+                metro=metro,
             )
 
             send_email(msg, config, retry_config)
@@ -327,6 +403,7 @@ def deliver_with_isolation(
     retry_config: RetryConfig = None,
     portal_config: PortalConfig = None,
     csv_label: str = None,
+    metro: Optional[str] = None,
 ) -> tuple[List[DeliveryResult], Optional[str]]:
     """
     Deliver to subscribers with full error isolation.
@@ -341,6 +418,7 @@ def deliver_with_isolation(
             retry_config=retry_config,
             portal_config=portal_config,
             csv_label=csv_label,
+            metro=metro,
         )
         return results, None
     except Exception as e:
