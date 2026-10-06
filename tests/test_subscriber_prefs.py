@@ -216,6 +216,54 @@ class TestFilterLeadsForSubscriber:
         assert len(result) == 1
         assert result[0]["city"] == "Austin, TX"
 
+    def test_city_filter_mismatch_excludes(self):
+        """A lead in a different metro is excluded."""
+        leads = [_make_lead(city="Phoenix, AZ")]
+        prefs = SubscriberPrefs(email="sub@test.com", cities=["Austin, TX"])
+        result = filter_leads_for_subscriber(leads, prefs)
+        assert result == []
+
+    def test_city_filter_case_insensitive(self):
+        """Metro matching ignores case ('austin, tx' matches 'Austin, TX')."""
+        leads = [
+            _make_lead(city="Austin, TX"),
+            _make_lead(city="Denver, CO", place_id="p2"),
+        ]
+        prefs = SubscriberPrefs(email="sub@test.com", cities=["austin, tx"])
+        result = filter_leads_for_subscriber(leads, prefs)
+        assert len(result) == 1
+        assert result[0]["city"] == "Austin, TX"
+
+        # ...and the other direction (stored metro lowercase vs lead canonical)
+        prefs2 = SubscriberPrefs(email="sub@test.com", cities=["Austin, TX"])
+        leads2 = [_make_lead(city="austin, tx")]
+        result2 = filter_leads_for_subscriber(leads2, prefs2)
+        assert len(result2) == 1
+
+    def test_empty_cities_returns_all_cities(self):
+        """Empty cities list = no city filter (all metros pass)."""
+        leads = [
+            _make_lead(city="Austin, TX"),
+            _make_lead(city="Denver, CO", place_id="p2"),
+            _make_lead(city="Phoenix, AZ", place_id="p3"),
+        ]
+        prefs = SubscriberPrefs(email="sub@test.com", cities=[])
+        result = filter_leads_for_subscriber(leads, prefs)
+        assert len(result) == 3
+
+    def test_multi_metro_union(self):
+        """Multiple metros in prefs act as a union filter."""
+        leads = [
+            _make_lead(city="Austin, TX"),
+            _make_lead(city="Denver, CO", place_id="p2"),
+            _make_lead(city="Phoenix, AZ", place_id="p3"),
+        ]
+        prefs = SubscriberPrefs(email="sub@test.com", cities=["Austin, TX", "Denver, CO"])
+        result = filter_leads_for_subscriber(leads, prefs)
+        assert len(result) == 2
+        cities = {r["city"] for r in result}
+        assert cities == {"Austin, TX", "Denver, CO"}
+
     def test_review_count_filter(self):
         leads = [
             _make_lead(review_count=100),
