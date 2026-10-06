@@ -18,6 +18,10 @@ from .logging_setup import get_logger
 
 logger = get_logger("gumroad")
 
+# Tier privilege ranking: higher wins when deduping by email; lower is the
+# safer fallback when a subscriber's variant is missing or unrecognized.
+_TIER_RANK = {"exclusive": 3, "pro": 2, "basic": 1, "standard": 1}
+
 
 @dataclass
 class Subscriber:
@@ -138,7 +142,9 @@ class GumroadClient:
                             subscriber_id=sub.get("id", ""),
                             created_at=sub.get("created_at", ""),
                             status=status,
-                            tier=tier,
+                            # Tiered memberships: read the tier from this
+                            # subscriber's variant, not the product mapping.
+                            tier=_tier_from_variant(sub.get("variants"), tier),
                             product_id=product_id,
                             product_name=product_name,
                             full_name=sub.get("full_name"),
@@ -201,16 +207,48 @@ def _parse_products(config: GumroadConfig) -> List[Dict[str, Any]]:
     return products
 
 
+def _tier_from_variant(variants: Any, fallback: str) -> str:
+    """Resolve a subscriber's tier from their Gumroad variant selection.
+
+    A tiered-membership product is a single product whose tiers live in each
+    subscriber's `variants` field (dict, list of strings, or plain string).
+    Falls back to the configured mapping tier when no variant matches.
+    """
+    names: List[str] = []
+    if isinstance(variants, dict):
+        names = [str(v) for v in variants.values()]
+    elif isinstance(variants, (list, tuple)):
+        names = [str(v) for v in variants]
+    elif isinstance(variants, str):
+        names = [variants]
+    for name in names:
+        lowered = name.lower()
+        if "exclusive" in lowered:
+            return "exclusive"
+        if "standard" in lowered:
+            return "standard"
+    return fallback
+
+
+def _safest_fallback_tier(tiers: List[str]) -> str:
+    """Pick the lowest-privilege tier among those mapped to one product id.
+
+    Used as the variant fallback so a missing/unrecognized variant can never
+    inherit a higher tier just because it appeared first in the mapping.
+    Unknown tier names rank 0 (least privilege).
+    """
+    return min(tiers, key=lambda t: _TIER_RANK.get(t, 0))
+
+
 def _dedupe_by_email(subscribers: List[Subscriber]) -> List[Subscriber]:
-    """Deduplicate by email, keeping highest tier (exclusive > pro > basic)."""
-    rank = {"exclusive": 3, "pro": 2, "basic": 1}
+    """Deduplicate by email, keeping highest tier (exclusive > pro > basic/standard)."""
     by_email: Dict[str, Subscriber] = {}
     for sub in subscribers:
         existing = by_email.get(sub.email)
         if not existing:
             by_email[sub.email] = sub
             continue
-        if rank.get(sub.tier, 0) > rank.get(existing.tier, 0):
+        if _TIER_RANK.get(sub.tier, 0) > _TIER_RANK.get(existing.tier, 0):
             by_email[sub.email] = sub
     return list(by_email.values())
 
@@ -304,13 +342,22 @@ def get_subscribers_with_isolation(
         if not products:
             return [], "No Gumroad products configured"
 
-        all_subscribers: List[Subscriber] = []
+        # Tiered memberships map several tiers to the SAME product id —
+        # fetch each product once; per-record variant tiers handle the rest.
+        tiers_by_product: Dict[str, List[str]] = {}
         for product in products:
             tier = str(product.get("tier", "basic")).lower()
             product_id = product.get("id")
-            if not product_id:
-                continue
-            subs = client.get_active_subscribers(product_id, tier)
+            if product_id:
+                tiers_by_product.setdefault(product_id, []).append(tier)
+
+        all_subscribers: List[Subscriber] = []
+        for product_id, tiers in tiers_by_product.items():
+            # Least-privilege fallback, independent of mapping order, so an
+            # untagged subscriber can't inherit the highest mapped tier.
+            subs = client.get_active_subscribers(
+                product_id, _safest_fallback_tier(tiers)
+            )
             all_subscribers.extend(subs)
 
         # Enforce Pro seat cap
