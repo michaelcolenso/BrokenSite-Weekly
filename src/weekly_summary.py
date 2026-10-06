@@ -28,6 +28,7 @@ def build_summary_text(
     db: Database,
     market_report_paths: Optional[List[str]] = None,
     min_score: int = 40,
+    action_items: Optional[List[str]] = None,
 ) -> str:
     """
     Build the weekly summary email body from database stats and market reports.
@@ -36,6 +37,7 @@ def build_summary_text(
         db: Database instance for querying stats.
         market_report_paths: Optional list of market report file paths.
         min_score: Minimum score threshold used for the run.
+        action_items: Optional operator flags (held subscribers, cap holds).
 
     Returns:
         Plain text email body.
@@ -77,6 +79,14 @@ def build_summary_text(
                 lines.append(f"  Duration: {duration_min} minutes")
             except Exception:
                 pass
+        lines.append("")
+
+    # Operator flags (held subscribers, cap holds, claimed-metro conflicts)
+    if action_items:
+        lines.append("ACTION NEEDED")
+        lines.append("-" * 30)
+        for item in action_items:
+            lines.append(f"  • {item}")
         lines.append("")
 
     # Top city/category combos
@@ -147,6 +157,7 @@ def generate_weekly_summary(
     db: Database,
     market_report_paths: Optional[List[str]] = None,
     min_score: int = 40,
+    action_items: Optional[List[str]] = None,
 ) -> Tuple[str, Optional[Path]]:
     """
     Generate the weekly summary text and write it to a file.
@@ -154,7 +165,7 @@ def generate_weekly_summary(
     Returns (summary_text, file_path).
     """
     try:
-        text = build_summary_text(db, market_report_paths, min_score)
+        text = build_summary_text(db, market_report_paths, min_score, action_items=action_items)
         path = write_summary_to_file(text)
         return text, path
     except Exception as e:

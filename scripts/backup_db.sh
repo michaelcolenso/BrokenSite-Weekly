@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DATA_DIR="$PROJECT_ROOT/data"
 DB_FILE="$DATA_DIR/leads.db"
+PREFS_FILE="$DATA_DIR/subscriber_prefs.json"
 BACKUP_DIR="$DATA_DIR/backups"
 
 # Parse arguments
@@ -33,6 +34,7 @@ prune_backups() {
     if [[ -d "$BACKUP_DIR" ]]; then
         echo "Removing backups older than $days days..."
         find "$BACKUP_DIR" -name "leads.db.backup.*" -type f -mtime "+$days" -delete -print
+        find "$BACKUP_DIR" -name "subscriber_prefs.json.backup.*" -type f -mtime "+$days" -delete -print
     fi
 }
 
@@ -63,6 +65,13 @@ create_backup() {
     # Show backup size
     if [[ -f "$BACKUP_FILE" ]]; then
         ls -lh "$BACKUP_FILE"
+    fi
+
+    # Subscriber prefs (metros) drive per-subscriber delivery — back them up too.
+    if [[ -f "$PREFS_FILE" ]]; then
+        PREFS_BACKUP="$BACKUP_DIR/subscriber_prefs.json.backup.$TIMESTAMP"
+        cp "$PREFS_FILE" "$PREFS_BACKUP"
+        echo "Backup created: $PREFS_BACKUP"
     fi
 }
 

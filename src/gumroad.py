@@ -202,8 +202,8 @@ def _parse_products(config: GumroadConfig) -> List[Dict[str, Any]]:
 
 
 def _dedupe_by_email(subscribers: List[Subscriber]) -> List[Subscriber]:
-    """Deduplicate by email, keeping highest tier (pro > basic)."""
-    rank = {"pro": 2, "basic": 1}
+    """Deduplicate by email, keeping highest tier (exclusive > pro > basic)."""
+    rank = {"exclusive": 3, "pro": 2, "basic": 1}
     by_email: Dict[str, Subscriber] = {}
     for sub in subscribers:
         existing = by_email.get(sub.email)
@@ -215,9 +215,83 @@ def _dedupe_by_email(subscribers: List[Subscriber]) -> List[Subscriber]:
     return list(by_email.values())
 
 
+def enforce_exclusive_caps(
+    subscribers: List[Subscriber],
+    prefs_store=None,
+    cap: int = 3,
+) -> Tuple[List[Subscriber], List[Dict[str, Any]]]:
+    """Enforce the per-metro seat cap for the exclusive tier.
+
+    Groups exclusive-tier subscribers by metro (from the subscriber prefs
+    store) and keeps the earliest `created_at` subscribers per metro, up to
+    `cap` seats. Subscribers over the cap are *held* — never silently
+    dropped — and returned in the held list so the operator can refund or
+    reassign them. Each metro in a multi-metro prefs list counts separately.
+
+    Returns (allowed_subscribers, held) where held is a list of dicts:
+    {"email", "tier", "metro", "reason"}.
+    """
+    exclusive_subs = [s for s in subscribers if s.tier == "exclusive"]
+    if not exclusive_subs or not cap or cap <= 0:
+        return list(subscribers), []
+
+    if prefs_store is None:
+        # Late import to keep gumroad.py usable without the prefs module.
+        from .subscriber_prefs import SubscriberPrefsStore
+
+        prefs_store = SubscriberPrefsStore()
+
+    def _metros(sub: Subscriber) -> List[str]:
+        prefs = prefs_store.get_or_default(sub.email)
+        return [c.strip() for c in prefs.cities if c and c.strip()]
+
+    # Per metro, rank exclusive subscribers by earliest created_at.
+    subs_by_metro: Dict[str, List[Tuple[Subscriber, str]]] = {}
+    for sub in exclusive_subs:
+        for metro in _metros(sub):
+            subs_by_metro.setdefault(metro.lower(), []).append((sub, metro))
+
+    kept_seats: set = set()  # (email_lower, metro_lower)
+    held: List[Dict[str, Any]] = []
+    for metro_key, entries in subs_by_metro.items():
+        entries_sorted = sorted(entries, key=lambda e: e[0].created_at or "")
+        for sub, _metro in entries_sorted[:cap]:
+            kept_seats.add((sub.email.lower(), metro_key))
+        for sub, metro in entries_sorted[cap:]:
+            held.append({
+                "email": sub.email,
+                "tier": "exclusive",
+                "metro": metro,
+                "reason": (
+                    f"exclusive seat cap reached for {metro} "
+                    f"({cap} seats, earliest created_at wins) — refund or reassign"
+                ),
+            })
+
+    # Delivery uses the primary metro (cities[0]). An exclusive subscriber is
+    # allowed iff their primary metro seat is within the cap. Unmapped
+    # exclusive subscribers pass through here — delivery holds them instead.
+    allowed: List[Subscriber] = []
+    for sub in subscribers:
+        if sub.tier != "exclusive":
+            allowed.append(sub)
+            continue
+        metros = _metros(sub)
+        if not metros or (sub.email.lower(), metros[0].lower()) in kept_seats:
+            allowed.append(sub)
+
+    if held:
+        logger.warning(
+            f"Exclusive seat cap: holding {len(held)} metro seat(s) over the cap of {cap}"
+        )
+    return allowed, held
+
+
 def get_subscribers_with_isolation(
     config: GumroadConfig,
     retry_config: RetryConfig = None,
+    prefs_store=None,
+    held_out: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[List[Subscriber], Optional[str]]:
     """
     Get subscribers with error isolation.
@@ -255,6 +329,16 @@ def get_subscribers_with_isolation(
                 )
 
         subscribers = _dedupe_by_email(all_subscribers)
+
+        # Enforce per-metro exclusive tier seat cap (held subs are flagged,
+        # never silently dropped).
+        subscribers, held = enforce_exclusive_caps(
+            subscribers,
+            prefs_store=prefs_store,
+            cap=getattr(config, "exclusive_seat_cap", 3),
+        )
+        if held_out is not None:
+            held_out.extend(held)
         return subscribers, None
     except Exception as e:
         logger.error(f"Failed to get subscribers: {e}")
