@@ -138,7 +138,9 @@ class GumroadClient:
                             subscriber_id=sub.get("id", ""),
                             created_at=sub.get("created_at", ""),
                             status=status,
-                            tier=tier,
+                            # Tiered memberships: read the tier from this
+                            # subscriber's variant, not the product mapping.
+                            tier=_tier_from_variant(sub.get("variants"), tier),
                             product_id=product_id,
                             product_name=product_name,
                             full_name=sub.get("full_name"),
@@ -201,9 +203,32 @@ def _parse_products(config: GumroadConfig) -> List[Dict[str, Any]]:
     return products
 
 
+def _tier_from_variant(variants: Any, fallback: str) -> str:
+    """Resolve a subscriber's tier from their Gumroad variant selection.
+
+    A tiered-membership product is a single product whose tiers live in each
+    subscriber's `variants` field (dict, list of strings, or plain string).
+    Falls back to the configured mapping tier when no variant matches.
+    """
+    names: List[str] = []
+    if isinstance(variants, dict):
+        names = [str(v) for v in variants.values()]
+    elif isinstance(variants, (list, tuple)):
+        names = [str(v) for v in variants]
+    elif isinstance(variants, str):
+        names = [variants]
+    for name in names:
+        lowered = name.lower()
+        if "exclusive" in lowered:
+            return "exclusive"
+        if "standard" in lowered:
+            return "standard"
+    return fallback
+
+
 def _dedupe_by_email(subscribers: List[Subscriber]) -> List[Subscriber]:
-    """Deduplicate by email, keeping highest tier (exclusive > pro > basic)."""
-    rank = {"exclusive": 3, "pro": 2, "basic": 1}
+    """Deduplicate by email, keeping highest tier (exclusive > pro > basic/standard)."""
+    rank = {"exclusive": 3, "pro": 2, "basic": 1, "standard": 1}
     by_email: Dict[str, Subscriber] = {}
     for sub in subscribers:
         existing = by_email.get(sub.email)
@@ -304,12 +329,16 @@ def get_subscribers_with_isolation(
         if not products:
             return [], "No Gumroad products configured"
 
+        # Tiered memberships map several tiers to the SAME product id —
+        # fetch each product once; per-record variant tiers handle the rest.
+        seen_product_ids = set()
         all_subscribers: List[Subscriber] = []
         for product in products:
             tier = str(product.get("tier", "basic")).lower()
             product_id = product.get("id")
-            if not product_id:
+            if not product_id or product_id in seen_product_ids:
                 continue
+            seen_product_ids.add(product_id)
             subs = client.get_active_subscribers(product_id, tier)
             all_subscribers.extend(subs)
 
