@@ -21,7 +21,13 @@ from .config import load_config, validate_config, Config, OUTPUT_DIR
 from .logging_setup import setup_logging, RunContext, get_logger
 from .db import Database, Lead
 from .gumroad import get_subscribers_with_isolation
-from .delivery import deliver_with_isolation, generate_csv, generate_manual_review_csv
+from .delivery import (
+    deliver_with_isolation,
+    generate_csv,
+    generate_manual_review_csv,
+    send_quiet_week_emails,
+    _metro_slug,
+)
 from .audit_generator import generate_audit_page, get_issues_json
 from .contact_finder import find_contact_with_isolation
 from .outreach import run_outreach, run_followups
@@ -29,7 +35,7 @@ from .warm_delivery import deliver_warm_leads_with_isolation
 from .lead_utils import compute_lead_tier, compute_exclusive_until
 from .competitor_analysis import analyze_competitors_for_lead
 from .market_reports import generate_market_report, write_market_report
-from .subscriber_prefs import SubscriberPrefsStore, filter_leads_for_subscriber
+from .subscriber_prefs import SubscriberPrefs, SubscriberPrefsStore, filter_leads_for_subscriber
 from .weekly_summary import generate_weekly_summary
 from .change_detection import take_snapshot, detect_changes
 from .yelp_scraper import cross_reference_with_isolation, apply_yelp_scoring
@@ -261,12 +267,93 @@ def process_business(
         return None
 
 
+def derive_scrape_cities(
+    subscribers: list,
+    prefs_store: SubscriberPrefsStore,
+    fallback_cities: list,
+) -> tuple[list, bool]:
+    """Derive the weekly scrape set from mapped subscriber metros.
+
+    Returns (cities, fell_back). The scrape set is the union of mapped
+    subscriber metros (first-seen order, canonical casing from prefs).
+    Metros with zero active subscribers are never scraped. When no
+    subscriber has a metro mapped (bootstrap), falls back to
+    config.target_cities and fell_back is True.
+    """
+    seen: dict = {}
+    for sub in subscribers:
+        prefs = prefs_store.get_or_default(sub.email)
+        for city in prefs.cities:
+            city = city.strip()
+            if city and city.lower() not in seen:
+                seen[city.lower()] = city
+    if seen:
+        return list(seen.values()), False
+    return list(fallback_cities), True
+
+
+def partition_subscribers_by_metro(
+    subscribers: list,
+    prefs_store: SubscriberPrefsStore,
+) -> tuple[dict, list]:
+    """Partition subscribers into delivery groups and held subscribers.
+
+    Returns (groups, held):
+      - groups: dict mapping (tier, metro) -> [subscribers]. Exclusive is its
+        own group tier; anything that isn't "pro"/"exclusive" is "basic".
+      - held: list of {"email", "tier", "metro", "reason"} dicts for
+        subscribers who receive nothing this week (unmapped, or mapped to a
+        metro claimed by the exclusive tier).
+    """
+    # Metros claimed by at least one exclusive subscriber.
+    claimed_metros = set()
+    for sub in subscribers:
+        if sub.tier == "exclusive":
+            prefs = prefs_store.get_or_default(sub.email)
+            for city in prefs.cities:
+                if city.strip():
+                    claimed_metros.add(city.strip().lower())
+
+    groups: dict = {}
+    held: list = []
+    for sub in subscribers:
+        prefs = prefs_store.get_or_default(sub.email)
+        metro = prefs.cities[0].strip() if prefs.cities and prefs.cities[0].strip() else None
+        tier = sub.tier if sub.tier in ("pro", "exclusive") else "basic"
+
+        if not metro:
+            held.append({
+                "email": sub.email,
+                "tier": tier,
+                "metro": None,
+                "reason": "no metro mapped — run scripts/set_subscriber_metro.py set",
+            })
+            continue
+
+        if tier != "exclusive" and metro.lower() in claimed_metros:
+            held.append({
+                "email": sub.email,
+                "tier": tier,
+                "metro": metro,
+                "reason": (
+                    f"{metro} is claimed by the exclusive tier — "
+                    "contact subscriber to upgrade or pick another metro"
+                ),
+            })
+            continue
+
+        groups.setdefault((tier, metro), []).append(sub)
+
+    return groups, held
+
+
 def run_scraping_phase(
     config: Config,
     db: Database,
     run_ctx: RunContext,
     shutdown: GracefulShutdown,
     dry_run: bool = False,
+    cities: Optional[list] = None,
 ) -> list:
     """
     Phase 1: Scrape Google Maps and score websites.
@@ -274,13 +361,17 @@ def run_scraping_phase(
 
     Args:
         dry_run: If True, skip database writes.
+        cities: Explicit city list to scrape. Defaults to config.target_cities.
     """
     qualifying_leads = []
     market_report_paths = []
 
     from .maps_scraper import scrape_with_isolation
 
-    for city in config.target_cities:
+    scrape_cities = list(cities) if cities else list(config.target_cities)
+    logger.info(f"Scrape set: {len(scrape_cities)} cities: {', '.join(scrape_cities)}")
+
+    for city in scrape_cities:
         if shutdown.check():
             logger.warning("Shutdown requested, stopping scrape phase")
             break
@@ -436,153 +527,180 @@ def run_delivery_phase(
     run_ctx: RunContext,
     prefs_store: Optional[SubscriberPrefsStore] = None,
     dry_run: bool = False,
+    subscribers: Optional[list] = None,
+    held: Optional[list] = None,
 ) -> bool:
     """
-    Phase 2: Get subscribers and deliver CSV.
+    Phase 2: Get subscribers and deliver per-metro CSVs.
     Returns True if delivery succeeded.
+
+    Subscribers are grouped by (tier, metro) using the prefs store; each
+    group gets one CSV filtered to its metro (metro in subject/filename).
+    Unmapped subscribers and basic/pro subscribers in exclusive-claimed
+    metros are held (no email) and flagged for the weekly summary.
+    Exclusive-tier subscribers are served from the pro lead pool.
 
     Args:
         dry_run: If True, skip actual SMTP sends and database updates.
-        prefs_store: Optional subscriber preferences store for filtering.
+        prefs_store: Subscriber preferences store (metros live here).
+        subscribers: Pre-fetched subscriber list (skips the Gumroad call).
+        held: Pre-computed held records (e.g. exclusive cap holds) to merge in.
     """
-    # Fetch subscribers with tiers
-    subscribers, sub_error = get_subscribers_with_isolation(
-        config=config.gumroad,
-        retry_config=config.retry,
-    )
+    if prefs_store is None:
+        prefs_store = SubscriberPrefsStore()
 
-    if sub_error:
-        logger.error(f"Failed to get subscribers: {sub_error}")
-        run_ctx.increment("errors")
-        return False
+    held = list(held or [])
+
+    # Fetch subscribers with tiers (exclusive per-metro caps enforced inside)
+    if subscribers is None:
+        subscribers, sub_error = get_subscribers_with_isolation(
+            config=config.gumroad,
+            retry_config=config.retry,
+            prefs_store=prefs_store,
+            held_out=held,
+        )
+        if sub_error:
+            logger.error(f"Failed to get subscribers: {sub_error}")
+            run_ctx.increment("errors")
+            return False
 
     if not subscribers:
         logger.warning("No active subscribers found")
         return True
 
-    pro_subs = [s for s in subscribers if s.tier == "pro"]
-    basic_subs = [s for s in subscribers if s.tier != "pro"]
+    # Partition into (tier, metro) groups; hold unmapped / claimed-metro subs.
+    groups, partition_held = partition_subscribers_by_metro(subscribers, prefs_store)
+    held.extend(partition_held)
 
-    # Fetch leads by tier
-    leads_pro = db.get_unexported_leads_for_tier(
-        min_score=config.scoring.min_score_to_include,
-        tier="pro",
-        limit=500,
-    )
-    leads_basic = db.get_unexported_leads_for_tier(
-        min_score=config.scoring.min_score_to_include,
-        tier="basic",
-        limit=500,
-    )
+    # Record operator flags for the weekly summary "ACTION NEEDED" section.
+    flags = run_ctx.stats.setdefault("operator_flags", [])
+    for h in held:
+        flag = f"{h['email']} ({h['tier']}): {h['reason']}"
+        if flag not in flags:
+            flags.append(flag)
+        logger.warning(f"HELD subscriber {h['email']} ({h['tier']}): {h['reason']}")
 
-    if not leads_pro and not leads_basic:
-        logger.info("No new leads to deliver")
+    if not groups:
+        logger.warning("No deliverable (tier, metro) subscriber groups this run")
         return True
+
+    # Fetch leads by pool. Exclusive subscribers are served from the pro pool.
+    tiers_present = {tier for tier, _metro in groups}
+    leads_pro = []
+    leads_basic = []
+    if tiers_present & {"pro", "exclusive"}:
+        # TODO(metro-scale): get_unexported_leads_for_tier caps at 500 across
+        # ALL cities. When weekly leads regularly exceed ~400, add an optional
+        # `cities` parameter to push the metro filter into SQL.
+        leads_pro = db.get_unexported_leads_for_tier(
+            min_score=config.scoring.min_score_to_include,
+            tier="pro",
+            limit=500,
+        )
+    if "basic" in tiers_present:
+        leads_basic = db.get_unexported_leads_for_tier(
+            min_score=config.scoring.min_score_to_include,
+            tier="basic",
+            limit=500,
+        )
 
     # Prepare portal config fallback
     portal_config = config.portal
     if portal_config and not portal_config.base_url:
         portal_config.base_url = config.outreach.tracking_base_url
 
-    # Dry-run logging
-    if dry_run:
-        if leads_pro:
-            logger.info(f"[DRY-RUN] Would deliver {len(leads_pro)} pro leads to {len(pro_subs)} pro subscribers")
-        if leads_basic:
-            logger.info(f"[DRY-RUN] Would deliver {len(leads_basic)} basic leads to {len(basic_subs)} basic subscribers")
-        run_ctx.stats["emails_sent"] = 0
-        run_ctx.stats["leads_exported"] = 0
-        return True
-
     total_emails_sent = 0
     total_leads_exported = 0
 
-    # Apply subscriber preferences filtering
-    if prefs_store:
-        _filtered_pro = []
-        for sub in pro_subs:
-            prefs = prefs_store.get_or_default(sub.email)
-            sub_filtered = filter_leads_for_subscriber(
-                leads_pro, prefs, global_min_score=config.scoring.min_score_to_include
-            )
-            if len(sub_filtered) < len(leads_pro):
+    for (tier, metro), group_subs in sorted(groups.items()):
+        pool_tier = "pro" if tier in ("pro", "exclusive") else "basic"
+        pool = leads_pro if pool_tier == "pro" else leads_basic
+
+        # City filter does the work: one prefs-like object per (tier, metro).
+        group_prefs = SubscriberPrefs(email=f"__group__:{tier}:{metro}", cities=[metro])
+        filtered = filter_leads_for_subscriber(
+            pool, group_prefs, global_min_score=config.scoring.min_score_to_include
+        )
+        csv_label = f"{tier}_{_metro_slug(metro)}"
+
+        if not filtered:
+            # Zero-lead "quiet week": short email, no attachment.
+            if dry_run:
                 logger.info(
-                    f"Subscriber {sub.email}: filtered {len(leads_pro)} → {len(sub_filtered)} leads"
+                    f"[DRY-RUN] Would send quiet-week email to {len(group_subs)} "
+                    f"{tier} subscriber(s) in {metro} (0 qualifying leads)"
                 )
-            _filtered_pro.append(sub_filtered)
-        # Use the union of all filtered pro leads for delivery
-        # (but deliver each subscriber's personalized set)
-        if pro_subs:
-            # For now, deliver all pro leads to all pro subs; filtering is per-subscriber
-            # and applied during individual delivery in a future enhancement
-            pass
-
-    # Deliver to Pro tier
-    if pro_subs and leads_pro:
-        results, delivery_error = deliver_with_isolation(
-            subscribers=pro_subs,
-            leads=leads_pro,
-            config=config.smtp,
-            retry_config=config.retry,
-            portal_config=portal_config,
-            csv_label="pro",
-        )
-        if delivery_error:
-            logger.error(f"Pro delivery error: {delivery_error}")
-            run_ctx.increment("errors")
-        else:
+                continue
+            results = send_quiet_week_emails(
+                subscribers=group_subs,
+                metro=metro,
+                config=config.smtp,
+                retry_config=config.retry,
+                portal_config=portal_config,
+            )
             success_count = sum(1 for r in results if r.success)
             total_emails_sent += success_count
-            if success_count > 0:
-                total_leads_exported += len(leads_pro)
-                place_ids = [lead["place_id"] for lead in leads_pro]
-                db.mark_exported(place_ids, tier="pro")
-                logger.info(f"Marked {len(place_ids)} pro leads as exported")
             for result in results:
                 if result.success:
                     db.record_export(
                         run_id=run_ctx.run_id,
                         subscriber_email=result.subscriber_email,
-                        lead_count=len(leads_pro),
-                        csv_path=result.csv_path or "",
-                        tier="pro",
-                        export_type="cold",
+                        lead_count=0,
+                        csv_path="",
+                        tier=tier,
+                        export_type="quiet_week",
                     )
+            continue
 
-    # Deliver to Basic tier
-    if basic_subs and leads_basic:
+        if dry_run:
+            logger.info(
+                f"[DRY-RUN] Would deliver {len(filtered)} {tier} leads for {metro} "
+                f"to {len(group_subs)} subscriber(s) "
+                f"({', '.join(s.email for s in group_subs)})"
+            )
+            continue
+
         results, delivery_error = deliver_with_isolation(
-            subscribers=basic_subs,
-            leads=leads_basic,
+            subscribers=group_subs,
+            leads=filtered,
             config=config.smtp,
             retry_config=config.retry,
             portal_config=portal_config,
-            csv_label="basic",
+            csv_label=csv_label,
+            metro=metro,
         )
         if delivery_error:
-            logger.error(f"Basic delivery error: {delivery_error}")
+            logger.error(f"Delivery error ({tier}, {metro}): {delivery_error}")
             run_ctx.increment("errors")
-        else:
-            success_count = sum(1 for r in results if r.success)
-            total_emails_sent += success_count
-            if success_count > 0:
-                total_leads_exported += len(leads_basic)
-                place_ids = [lead["place_id"] for lead in leads_basic]
-                db.mark_exported(place_ids, tier="basic")
-                logger.info(f"Marked {len(place_ids)} basic leads as exported")
-            for result in results:
-                if result.success:
-                    db.record_export(
-                        run_id=run_ctx.run_id,
-                        subscriber_email=result.subscriber_email,
-                        lead_count=len(leads_basic),
-                        csv_path=result.csv_path or "",
-                        tier="basic",
-                        export_type="cold",
-                    )
+            continue
 
-    run_ctx.stats["emails_sent"] = total_emails_sent
-    run_ctx.stats["leads_exported"] = total_leads_exported
+        success_count = sum(1 for r in results if r.success)
+        total_emails_sent += success_count
+        if success_count > 0:
+            # Mark only the place_ids actually delivered to >=1 subscriber.
+            total_leads_exported += len(filtered)
+            place_ids = [lead["place_id"] for lead in filtered]
+            db.mark_exported(place_ids, tier=pool_tier)
+            logger.info(
+                f"Marked {len(place_ids)} {pool_tier} leads as exported ({tier}, {metro})"
+            )
+        for result in results:
+            if result.success:
+                db.record_export(
+                    run_id=run_ctx.run_id,
+                    subscriber_email=result.subscriber_email,
+                    lead_count=len(filtered),
+                    csv_path=result.csv_path or "",
+                    tier=tier,
+                    export_type="cold",
+                )
+
+    if dry_run:
+        run_ctx.stats["emails_sent"] = 0
+        run_ctx.stats["leads_exported"] = 0
+    else:
+        run_ctx.stats["emails_sent"] = total_emails_sent
+        run_ctx.stats["leads_exported"] = total_leads_exported
 
     return True
 
@@ -863,6 +981,43 @@ def run_weekly(
             scraped_qualifying_leads: Optional[list[Lead]] = None
             lead_snapshot: Optional[dict] = None
 
+            # Pre-fetch subscribers so the scrape set can be derived from
+            # mapped subscriber metros. Skipped for scrape-only/outreach-only
+            # runs (no Gumroad call needed); delivery refetches on its own if
+            # this fetch failed.
+            prefetched_subscribers: Optional[list] = None
+            prefetched_held: list = []
+            scrape_cities: Optional[list] = None
+            if not skip_scrape and not skip_delivery:
+                prefetched_subscribers, sub_err = get_subscribers_with_isolation(
+                    config=config.gumroad,
+                    retry_config=config.retry,
+                    prefs_store=prefs_store,
+                    held_out=prefetched_held,
+                )
+                if sub_err:
+                    logger.warning(
+                        f"Could not derive scrape set from subscribers ({sub_err}); "
+                        "falling back to config.target_cities"
+                    )
+                    prefetched_subscribers = None
+                    prefetched_held = []
+                else:
+                    scrape_cities, fell_back = derive_scrape_cities(
+                        prefetched_subscribers, prefs_store, config.target_cities
+                    )
+                    if fell_back:
+                        logger.info(
+                            "No subscriber metros mapped; scrape set falls back to "
+                            f"config.target_cities: {', '.join(scrape_cities)}"
+                        )
+                    else:
+                        logger.info(
+                            f"Scrape set derived from subscriber metros: "
+                            f"{', '.join(scrape_cities)} "
+                            "(metros with zero active subscribers are not scraped)"
+                        )
+
             # Phase 0: Take snapshot for change detection (before scraping)
             if not skip_scrape and not dry_run:
                 logger.info("=== Phase 0: Snapshot ===")
@@ -874,7 +1029,7 @@ def run_weekly(
                 logger.info("=== Phase 1: Scraping ===")
                 run_ctx.start_phase("scraping")
                 scraped_qualifying_leads = run_scraping_phase(
-                    config, db, run_ctx, shutdown, dry_run=dry_run
+                    config, db, run_ctx, shutdown, dry_run=dry_run, cities=scrape_cities
                 )
                 duration = run_ctx.end_phase("scraping")
                 logger.info("Phase 'scraping' completed in %.2fs", duration)
@@ -981,7 +1136,13 @@ def run_weekly(
             if not skip_delivery:
                 logger.info("=== Phase 2: Delivery ===")
                 run_ctx.start_phase("delivery")
-                run_delivery_phase(config, db, run_ctx, prefs_store=prefs_store, dry_run=dry_run)
+                run_delivery_phase(
+                    config, db, run_ctx,
+                    prefs_store=prefs_store,
+                    dry_run=dry_run,
+                    subscribers=prefetched_subscribers,
+                    held=prefetched_held,
+                )
                 duration = run_ctx.end_phase("delivery")
                 logger.info("Phase 'delivery' completed in %.2fs", duration)
 
@@ -1048,6 +1209,7 @@ def run_weekly(
                     db=db,
                     market_report_paths=market_report_paths,
                     min_score=config.scoring.min_score_to_include,
+                    action_items=run_ctx.stats.get("operator_flags") or None,
                 )
                 if summary_path:
                     run_ctx.stats["weekly_summary_path"] = str(summary_path)
