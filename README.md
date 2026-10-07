@@ -61,13 +61,13 @@ src/
 
 ## Scoring
 
-| Score | Signal | Weight |
-|-------|--------|--------|
-| 75-100 | Hard failures (unreachable, 5xx, SSL error, parked) | High |
-| 40-74 | Medium (no HTTPS, old copyright, no viewport) | Medium |
-| 5-15 | Weak (DIY builders like Wix, Squarespace) | Low |
+Paid CSV is **hard-break only**: no HTTPS, parked, under construction, SSL error, timeout/unreachable, copyright year ≤ 2021, flash/frames, 5xx/404 homepage.
 
-Only leads scoring **≥40** are exported.
+Flags that no longer add score: GTM, FB pixel, missing email, phone mismatch, render-blocking, WordPress presence.
+
+Still scored: DIY Wix/Squarespace, outdated WordPress major < 6, no viewport.
+
+Existing DB rows are not rewritten; `--export-csv` filters on reasons.
 
 ## Launch Modes
 

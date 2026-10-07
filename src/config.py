@@ -101,19 +101,20 @@ class ScoringConfig:
     weight_http_only: int = 50
     weight_client_error: int = 40
     weight_not_found_or_forbidden: int = 75
-    weight_outdated_copyright: int = 25  # Copyright year > 2 years old
+    weight_outdated_copyright: int = 25  # Copyright year <= copyright_stale_year
+    copyright_stale_year: int = 2021
     weight_flash_detected: int = 40
     weight_missing_viewport: int = 20
     weight_missing_responsive: int = 15
-    weight_missing_meta_description: int = 10
-    weight_missing_h1: int = 8
-    weight_generic_title: int = 10
+    weight_missing_meta_description: int = 0
+    weight_missing_h1: int = 0
+    weight_generic_title: int = 0
     weight_under_construction: int = 30
 
-    # Marketing spend indicators (businesses already paying for ads = hotter leads)
-    weight_has_gtm: int = 15
-    weight_has_fb_pixel: int = 15
-    weight_has_gclid: int = 10
+    # Marketing spend: flags only, do not inflate brokenness score
+    weight_has_gtm: int = 0
+    weight_has_fb_pixel: int = 0
+    weight_has_gclid: int = 0
 
     # SSL certificate expiry
     ssl_expiry_days_threshold: int = 30
@@ -123,11 +124,9 @@ class ScoringConfig:
     weight_wordpress_outdated: int = 40
     wordpress_outdated_major: int = 6  # Major versions below this = outdated
 
-    # E-commerce platform detection
-    weight_ecommerce_platform: int = 15
-
-    # Render-blocking resource detection
-    weight_render_blocking: int = 10
+    # E-commerce / render-blocking: flags only
+    weight_ecommerce_platform: int = 0
+    weight_render_blocking: int = 0
     render_blocking_threshold: int = 5  # Flag when blocking resource count >= this
 
     # Broken image detection
@@ -138,9 +137,9 @@ class ScoringConfig:
     weight_broken_image: int = 15
 
     # Contact info signals
-    weight_phone_mismatch: int = 20
-    weight_missing_phone: int = 10
-    weight_missing_email: int = 10
+    weight_phone_mismatch: int = 0
+    weight_missing_phone: int = 0
+    weight_missing_email: int = 0
 
     # Dead social links
     dead_social_check_enabled: bool = field(
@@ -175,8 +174,9 @@ class ScoringConfig:
     weight_js_required: int = 5
 
     # No-website leads (optional)
-    include_no_website_leads: bool = True
+    include_no_website_leads: bool = False
     weight_no_website: int = 60
+    fetch_max_retries: int = 1  # scoring HTTP only; SMTP uses RetryConfig
     include_social_only_leads: bool = True
     weight_social_only: int = 60
 

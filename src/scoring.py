@@ -3,9 +3,10 @@ Website scoring module for BrokenSite-Weekly.
 Evaluates websites for "broken" or "outdated" signals.
 
 Scoring philosophy:
-- Hard failures (unreachable, 5xx, parked) = high score (75-100)
-- Medium signals (no SSL, outdated copyright) = medium score (15-40)
-- Weak signals (DIY builders) = low score (5-10) to minimize false positives
+- Hard failures (no HTTPS, parked, under construction, SSL error, timeout) = paid list
+- Copyright is stale only at year <= 2021
+- GTM, WordPress presence, missing email, phone mismatch, render-blocking are flags, not score
+- DIY builders remain a scored rebuild signal but are not paid-list hard-breaks
 """
 
 import re
@@ -917,7 +918,14 @@ def evaluate_website(
     # Fetch if no response provided
     if response is None:
         start = time.time()
-        response, error = fetch_website(url, config, retry_config)
+        fetch_retry = RetryConfig(
+            max_retries=int(getattr(config, "fetch_max_retries", 1)),
+            base_delay_seconds=1.0,
+            max_delay_seconds=8.0,
+            exponential_base=2.0,
+            jitter=True,
+        )
+        response, error = fetch_website(url, config, fetch_retry)
         if response:
             response_time_ms = int((time.time() - start) * 1000)
 
@@ -1118,8 +1126,7 @@ def evaluate_website(
     # Outdated copyright year
     copyright_year = _extract_copyright_year(html)
     if copyright_year:
-        years_old = datetime.now().year - copyright_year
-        if years_old >= 2:
+        if copyright_year <= getattr(config, "copyright_stale_year", 2021):
             score += config.weight_outdated_copyright
             reasons.append(f"copyright_{copyright_year}")
 
