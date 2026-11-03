@@ -469,8 +469,8 @@ class TestScoreThreshold:
         assert result.score >= scoring_config.min_score_to_include
 
     @patch("src.scoring.fetch_website")
-    def test_wix_now_exceeds_threshold(self, mock_fetch, scoring_config, sample_html_wix):
-        """A Wix site alone should now exceed the threshold (prime rebuild opportunity)."""
+    def test_wix_flagged_but_not_paid_threshold(self, mock_fetch, scoring_config, sample_html_wix):
+        """Wix is a rebuild flag; alone it must not meet the paid threshold."""
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.url = "https://example.com"
@@ -480,8 +480,7 @@ class TestScoreThreshold:
         result = evaluate_website("https://example.com", config=scoring_config)
 
         assert "diy_wix" in result.reasons
-        # Wix (30) + likely missing email/phone signals should push above 40
-        assert result.score >= scoring_config.min_score_to_include
+        assert result.score < scoring_config.min_score_to_include
 
 
 _BASE_HTML = """<!DOCTYPE html>
@@ -1283,44 +1282,40 @@ class TestRenderBlockingDetection:
 class TestCompositeTiering:
     """Tests for composite lead tiering with signal awareness."""
 
-    def test_parked_domain_is_skip(self):
-        """Parked domains should be skipped regardless of score."""
+    def test_parked_domain_is_hot(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(85, ["parked_domain", "no_https"])
-        assert tier == "skip"
+        assert tier == "hot"
 
-    def test_under_construction_is_cool(self):
-        """Under construction sites should be capped at cool."""
+    def test_under_construction_is_hot(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(75, ["under_construction"])
-        assert tier == "cool"
+        assert tier == "hot"
 
-    def test_dns_failed_is_skip(self):
+    def test_dns_failed_is_hot_at_high_score(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(95, ["dns_failed"])
-        assert tier == "skip"
+        assert tier == "hot"
 
-    def test_marketing_alone_bumps_score_40_to_warm(self):
-        """Marketing signals alone with score >= 40 bumps to warm."""
+    def test_marketing_alone_is_cool(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(45, ["has_gtm"])
-        assert tier == "warm"
+        assert tier == "cool"
 
-    def test_ecommerce_with_score_40_is_warm(self):
+    def test_ecommerce_with_score_40_is_cool(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(45, ["ecommerce_shopify"])
-        assert tier == "warm"
+        assert tier == "cool"
 
-    def test_pure_score_hot(self):
-        """Score >= 80 with no composite signals still returns hot."""
+    def test_ssl_error_is_hot(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(85, ["ssl_error"])
         assert tier == "hot"
 
-    def test_pure_score_warm(self):
+    def test_no_https_is_hot(self):
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(65, ["no_https"])
-        assert tier == "warm"
+        assert tier == "hot"
 
     def test_pure_score_cool(self):
         from src.lead_utils import compute_lead_tier
@@ -1333,10 +1328,9 @@ class TestCompositeTiering:
         assert tier == "skip"
 
     def test_no_reasons_uses_pure_score(self):
-        """When no reasons given, falls back to pure-score behavior."""
         from src.lead_utils import compute_lead_tier
         tier = compute_lead_tier(85)
-        assert tier == "hot"
+        assert tier == "warm"
         tier = compute_lead_tier(55)
         assert tier == "cool"
         tier = compute_lead_tier(25)

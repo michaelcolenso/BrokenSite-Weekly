@@ -32,7 +32,8 @@ from .audit_generator import generate_audit_page, get_issues_json
 from .contact_finder import find_contact_with_isolation
 from .outreach import run_outreach, run_followups
 from .warm_delivery import deliver_warm_leads_with_isolation
-from .lead_utils import compute_lead_tier, compute_exclusive_until
+from .lead_utils import compute_lead_tier, compute_exclusive_until, is_hard_break
+from .blocklist import is_blocked, is_junk_website
 from .competitor_analysis import analyze_competitors_for_lead
 from .market_reports import generate_market_report, write_market_report
 from .subscriber_prefs import SubscriberPrefs, SubscriberPrefsStore, filter_leads_for_subscriber
@@ -196,6 +197,10 @@ def process_business(
                     f"Score: {lead.score} | Reasons: {','.join(lead.reasons)}"
                 )
             return lead
+
+        if is_junk_website(business.website) or is_blocked(business.website):
+            logger.debug(f"Skipping {business.name}: junk or blocked website {business.website}")
+            return None
 
         run_ctx.increment("websites_checked")
 
@@ -482,12 +487,29 @@ def run_export_csv_phase(
     date_str = datetime.utcnow().strftime("%Y-%m-%d")
     csv_paths: list[str] = []
 
+    def _reasons_of(lead) -> str | list | None:
+        if isinstance(lead, dict):
+            return lead.get("reasons")
+        return getattr(lead, "reasons", None)
+
+    def _hard_only(leads: list) -> list:
+        kept = []
+        for lead in leads:
+            if not is_hard_break(_reasons_of(lead)):
+                continue
+            website = lead.get("website") if isinstance(lead, dict) else getattr(lead, "website", None)
+            if is_junk_website(website) or is_blocked(website):
+                continue
+            kept.append(lead)
+        return kept
+
     if scraped_qualifying_leads is not None:
         leads = [asdict(l) for l in scraped_qualifying_leads]
-        csv_filename = f"broken_site_leads_{date_str}_{label}_{run_ctx.run_id}.csv"
-        _, csv_path = generate_csv(leads, output_path=OUTPUT_DIR / csv_filename)
+        hard = _hard_only(leads)
+        csv_filename = f"broken_site_leads_{date_str}_hard_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(hard, output_path=OUTPUT_DIR / csv_filename)
         csv_paths.append(str(csv_path))
-        logger.info(f"Local CSV report created: {csv_path} ({len(leads)} leads)")
+        logger.info(f"Local CSV report created: {csv_path} ({len(hard)} hard-break leads)")
         return csv_paths
 
     # Export from existing DB (use the same tier logic as delivery, but no subscribers/SMTP).
@@ -506,17 +528,27 @@ def run_export_csv_phase(
         logger.info("No unexported leads available to write CSV")
         return csv_paths
 
-    if leads_pro:
-        csv_filename = f"broken_site_leads_{date_str}_pro_{run_ctx.run_id}.csv"
-        _, csv_path = generate_csv(leads_pro, output_path=OUTPUT_DIR / csv_filename)
-        csv_paths.append(str(csv_path))
-        logger.info(f"Local CSV report created: {csv_path} ({len(leads_pro)} pro leads)")
+    hard_pro = _hard_only(leads_pro)
+    hard_basic = _hard_only(leads_basic)
 
-    if leads_basic:
-        csv_filename = f"broken_site_leads_{date_str}_basic_{run_ctx.run_id}.csv"
-        _, csv_path = generate_csv(leads_basic, output_path=OUTPUT_DIR / csv_filename)
+    if hard_pro:
+        csv_filename = f"broken_site_leads_{date_str}_hard_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(hard_pro, output_path=OUTPUT_DIR / csv_filename)
         csv_paths.append(str(csv_path))
-        logger.info(f"Local CSV report created: {csv_path} ({len(leads_basic)} basic leads)")
+        logger.info(f"Local CSV report created: {csv_path} ({len(hard_pro)} hard-break leads)")
+
+    rebuild = [lead for lead in (leads_pro + leads_basic) if not is_hard_break(_reasons_of(lead))]
+    if rebuild:
+        csv_filename = f"broken_site_leads_{date_str}_rebuild_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(rebuild, output_path=OUTPUT_DIR / csv_filename)
+        csv_paths.append(str(csv_path))
+        logger.info(f"Rebuild-candidate CSV created: {csv_path} ({len(rebuild)} leads)")
+
+    if hard_basic and not hard_pro:
+        csv_filename = f"broken_site_leads_{date_str}_hard_basic_{run_ctx.run_id}.csv"
+        _, csv_path = generate_csv(hard_basic, output_path=OUTPUT_DIR / csv_filename)
+        csv_paths.append(str(csv_path))
+        logger.info(f"Local CSV report created: {csv_path} ({len(hard_basic)} hard-break basic leads)")
 
     return csv_paths
 

@@ -47,6 +47,7 @@ def test_export_csv_phase_writes_csv_from_scraped_leads(tmp_path, monkeypatch):
     assert csv_path.exists()
     content = csv_path.read_text(encoding="utf-8")
     assert "Test Business" in content
+    assert "_hard_" in paths[0]
 
 
 def csv_path_basename(path_str: str) -> str:

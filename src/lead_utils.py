@@ -5,55 +5,65 @@ Lead utility helpers for tiering, marketing signals, and outreach pitch.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 
 MARKETING_SIGNAL_REASONS = {"has_gtm", "has_fb_pixel", "has_gclid"}
 
+HARD_BREAK_EXACT = {
+    "no_https",
+    "parked_domain",
+    "under_construction",
+    "ssl_error",
+    "timeout",
+    "unreachable",
+    "dns_failed",
+    "empty_page",
+    "outdated_frames",
+    "outdated_flash",
+    "http_403",
+    "http_404",
+}
+HARD_BREAK_HOT = {
+    "parked_domain",
+    "no_https",
+    "under_construction",
+    "ssl_error",
+}
+COPYRIGHT_RE = re.compile(r"^copyright_(\d{4})$")
+COPYRIGHT_STALE_YEAR = 2021
+
+
+def is_hard_break(reasons: str | Iterable[str] | None) -> bool:
+    """True when reasons indicate a genuinely broken site (paid-list eligible)."""
+    for reason in parse_reasons(reasons):
+        if reason in HARD_BREAK_EXACT:
+            return True
+        if reason.startswith("server_error_"):
+            return True
+        match = COPYRIGHT_RE.match(reason)
+        if match and int(match.group(1)) <= COPYRIGHT_STALE_YEAR:
+            return True
+    return False
+
 
 def compute_lead_tier(score: int, reasons: Iterable[str] | None = None) -> str:
-    """Convert numeric score + signal context into a lead tier label.
+    """Tier leads for the paid broken-site list.
 
-    Pure-score tiering is cheap but misleading: a parked domain (dead business)
-    can score 75 while a Wix site with Google Ads (prime rebuild opportunity)
-    might score only 35. This function layers signal awareness on top of the
-    raw score to surface leads most likely to convert.
+    Hard-break signals (no HTTPS, parked, under construction, SSL dead) are the
+    product. Marketing pixels and WordPress are flags, not automatic hot leads.
     """
     reasons_set = set(parse_reasons(reasons)) if reasons else set()
 
-    # ── Dead / likely-out-of-business signals ──────────────────────────────
-    dead_signals = {"parked_domain", "dns_failed"}
-    if dead_signals & reasons_set:
-        return "skip"
-
-    # ── Under construction ─────────────────────────────────────────────────
-    # Usually a brand-new business (no budget yet) or abandoned project.
-    if "under_construction" in reasons_set:
-        return "cool"
-
-    # ── Composite upgrades ─────────────────────────────────────────────────
-    has_marketing = bool(MARKETING_SIGNAL_REASONS & reasons_set)
-    has_diy = any(r.startswith("diy_") for r in reasons_set)
-    has_wp_outdated = any(r.startswith("wp_outdated_") for r in reasons_set)
-    has_ecommerce = any(r.startswith("ecommerce_") for r in reasons_set)
-    has_no_https = "no_https" in reasons_set
-
-    # Marketing spend + bad platform = the hottest lead
-    if has_marketing and (has_diy or has_wp_outdated or has_no_https):
-        return "hot"
-
-    # E-commerce platform = higher-value rebuild
-    if has_ecommerce and score >= 40:
+    if is_hard_break(reasons_set):
+        if score >= 80 or (HARD_BREAK_HOT & reasons_set):
+            return "hot"
         return "warm"
 
-    # Marketing spend alone bumps warm leads
-    if has_marketing and score >= 40:
-        return "warm"
-
-    # ── Base tier from score ───────────────────────────────────────────────
     if score >= 80:
-        return "hot"
+        return "warm"
     if score >= 60:
         return "warm"
     if score >= 40:
